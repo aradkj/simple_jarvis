@@ -760,19 +760,25 @@ class AgentExecutor:
             # Analyze tool execution outcomes for strict truthfulness enforcement
             tool_steps = [s for s in plan.steps if s.step_type == StepType.TOOL_CALL]
             failed_tool_steps = [s for s in tool_steps if s.status == StepStatus.FAILED]
-            verified_tools = [
-                s
-                for s in tool_steps
-                if s.status == StepStatus.COMPLETED
-                and isinstance(s.result, dict)
-                and s.result.get("verified") is True
-            ]
+            replan_steps = [s for s in plan.steps if s.step_type == StepType.REPLAN]
             unverified_tools = [
                 s
                 for s in tool_steps
                 if s.status == StepStatus.COMPLETED
                 and isinstance(s.result, dict)
                 and s.result.get("verified") is False
+            ]
+            successful_tools = [
+                s
+                for s in tool_steps
+                if s.status == StepStatus.COMPLETED
+                and (
+                    not isinstance(s.result, dict)
+                    or (
+                        s.result.get("verified") is True
+                        or (s.result.get("verified") is None and not s.result.get("error"))
+                    )
+                )
             ]
 
             truth_directive = (
@@ -800,12 +806,18 @@ class AgentExecutor:
                 final_text = resp.text
 
                 # Post-synthesis Guardrail: Detect and prevent false success claims
-                if failed_tool_steps or unverified_tools:
+                if failed_tool_steps or unverified_tools or replan_steps:
                     err_detail = (
                         failed_tool_steps[0].error
                         if failed_tool_steps
                         else (
-                            unverified_tools[0].result.get("error_message") or "Verification failed"
+                            unverified_tools[0].result.get("error_message")
+                            if unverified_tools
+                            else (
+                                replan_steps[0].result.get("error")
+                                if replan_steps and isinstance(replan_steps[0].result, dict)
+                                else "Verification failed"
+                            )
                         )
                     )
                     # Check if response falsely claims success
@@ -850,27 +862,47 @@ class AgentExecutor:
                 return "success"
             except Exception:
                 step.status = StepStatus.COMPLETED
+                is_fa = any(ord(c) >= 0x0600 and ord(c) <= 0x06FF for c in plan.goal)
                 # Deterministic truthful fallback synthesis
-                if failed_tool_steps or unverified_tools:
-                    err = (
-                        failed_tool_steps[0].error
-                        if failed_tool_steps
-                        else "State verification failed"
-                    )
-                    fallback_msg = f"عملیات انجام نشد: {err}"
-                elif verified_tools:
-                    tool_step = verified_tools[0]
+                if failed_tool_steps or unverified_tools or replan_steps:
+                    if failed_tool_steps:
+                        err = failed_tool_steps[0].error or "Tool execution failed"
+                    elif unverified_tools:
+                        err = (
+                            unverified_tools[0].result.get("error_message")
+                            if isinstance(unverified_tools[0].result, dict)
+                            else "State verification failed"
+                        )
+                    elif replan_steps and isinstance(replan_steps[0].result, dict):
+                        err = (
+                            replan_steps[0].result.get("error") or "Operation encountered an error"
+                        )
+                    else:
+                        err = "Execution could not be completed"
+
+                    if is_fa:
+                        fallback_msg = f"متأسفانه در اجرای عملیات خطا رخ داد: {err}. وضعیت سیستم بدون تغییر باقی مانده است."
+                    else:
+                        fallback_msg = f"Unable to complete the requested operation: {err}. The system state remains unchanged."
+                elif successful_tools:
+                    tool_step = successful_tools[0]
                     tool_data = tool_step.result if isinstance(tool_step.result, dict) else {}
                     t_name = getattr(tool_step, "tool_name", "")
-                    if t_name == "system_cpu_info":
-                        cpu_pct = tool_data.get("cpu_percent") or tool_data.get(
-                            "usage_percent", "N/A"
+                    if "cpu" in t_name:
+                        cpu_pct = (
+                            tool_data.get("utilization_percent")
+                            if "utilization_percent" in tool_data
+                            else tool_data.get("cpu_percent", tool_data.get("usage_percent", "N/A"))
                         )
                         fallback_msg = f"میزان مصرف پردازنده (CPU): {cpu_pct}%"
-                    elif t_name == "system_memory_info":
-                        ram_pct = tool_data.get("percent") or tool_data.get("used_percent", "N/A")
+                    elif "memory" in t_name or "ram" in t_name:
+                        ram_pct = (
+                            tool_data.get("utilization_percent")
+                            if "utilization_percent" in tool_data
+                            else tool_data.get("percent", tool_data.get("used_percent", "N/A"))
+                        )
                         fallback_msg = f"میزان مصرف رم (RAM): {ram_pct}%"
-                    elif t_name == "system_disk_info":
+                    elif "disk" in t_name:
                         fallback_msg = f"اطلاعات دیسک سیستم: {tool_data}"
                     elif t_name == "windows_power_get_status":
                         batt = tool_data.get("battery_percent", "N/A")
@@ -891,7 +923,10 @@ class AgentExecutor:
                                 f"عملیات {t_name or op} با موفقیت در ویندوز انجام و تایید شد."
                             )
                 else:
-                    fallback_msg = f"Summary of execution: Completed {len(summary_context)} steps for goal: {plan.goal}"
+                    if is_fa:
+                        fallback_msg = f"متأسفانه نتوانستم عملیات را انجام دهم: {plan.goal}"
+                    else:
+                        fallback_msg = f"Unable to complete the requested goal: {plan.goal}"
                 step.result = fallback_msg
                 return "success"
 

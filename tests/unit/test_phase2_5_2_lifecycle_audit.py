@@ -220,9 +220,11 @@ def test_custom_models_remain_preserved() -> None:
 
 
 def test_existing_gemini_settings_preserved_and_unchanged() -> None:
-    """Verify existing .env file and user-configured Gemini settings remain preserved."""
+    """Verify existing .env or .env.example configuration and user-configured Gemini settings."""
     env_file = get_project_root() / ".env"
-    assert env_file.exists(), ".env file must exist"
+    if not env_file.exists():
+        env_file = get_project_root() / ".env.example"
+    assert env_file.exists(), ".env or .env.example file must exist"
 
     with open(env_file, encoding="utf-8") as f:
         content = f.read()

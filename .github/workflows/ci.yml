@@ -58,6 +58,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Initialize Environment File
+        run: |
+          if (!(Test-Path .env)) { Copy-Item .env.example .env }
+
       - name: Run Unit Tests
         run: |
           pytest tests/unit -v --tb=short
