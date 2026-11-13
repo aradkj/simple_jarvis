@@ -31,9 +31,15 @@ fi
 # 2. Test suite
 echo "[3/3] Running automated unit and integration tests..."
 export QT_QPA_PLATFORM=offscreen
-$PY -m pytest tests/unit tests/integration -q
+$PY -m pytest tests/unit -q
 if [ $? -ne 0 ]; then
-    echo "ERROR: Test suite failed. Push aborted."
+    echo "ERROR: Unit test suite failed. Push aborted."
+    exit 1
+fi
+
+$PY -m pytest tests/integration -q
+if [ $? -ne 0 ]; then
+    echo "ERROR: Integration test suite failed. Push aborted."
     exit 1
 fi
 
