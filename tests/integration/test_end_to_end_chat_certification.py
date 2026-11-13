@@ -309,12 +309,16 @@ def test_cert_notepad_launch_minimize_and_close(cert_settings: Settings) -> None
     bg_thread.join()
     assert outcome_completed.status == "completed"
 
-    time.sleep(1.0)
     pid = None
     try:
-        # Find Notepad window and process
-        windows = svc.list_windows()
-        notepad_wins = [w for w in windows if "notepad" in w.title.lower()]
+        # Find Notepad window and process with polling
+        notepad_wins = []
+        for _ in range(30):
+            windows = svc.list_windows()
+            notepad_wins = [w for w in windows if "notepad" in w.title.lower()]
+            if notepad_wins:
+                break
+            time.sleep(0.2)
         assert len(notepad_wins) > 0, "Notepad window not found after launch"
 
         target_win = notepad_wins[0]
@@ -457,12 +461,16 @@ def test_cert_window_maximize_focus_and_close(cert_settings: Settings) -> None:
     bg_thread.join()
     assert outcome.status == "completed"
 
-    time.sleep(1.0)
     pid = None
     try:
-        windows = svc.list_windows()
-        notepad_wins = [w for w in windows if "notepad" in w.title.lower()]
-        assert len(notepad_wins) > 0
+        notepad_wins = []
+        for _ in range(30):
+            windows = svc.list_windows()
+            notepad_wins = [w for w in windows if "notepad" in w.title.lower()]
+            if notepad_wins:
+                break
+            time.sleep(0.2)
+        assert len(notepad_wins) > 0, "Notepad window not found after launch"
         target = notepad_wins[0]
         pid = target.pid
 
