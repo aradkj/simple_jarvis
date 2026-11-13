@@ -20,7 +20,6 @@ from ai.providers.openai import OpenAIProvider
 from ai.registry import ProviderRegistry
 from config import Settings
 from memory.base import ConversationMessage, MessageRole, MessageStatus
-from ui.chat_panel import MessageBubble
 
 
 def test_openai_reasoning_model_parameter_adaptation():
@@ -269,18 +268,6 @@ def test_mid_stream_interruption_no_silent_fallback():
         next(stream)
 
     prov_b.stream_text.assert_not_called()
-
-
-def test_message_bubble_mark_failed_preserves_partial_content(qapp):
-    """Verify UI MessageBubble displays interrupted notice without wiping partial output."""
-    bubble = MessageBubble(sender="JARVIS", text="", is_user=False)
-    bubble.set_content("This was partially received before failing...")
-    bubble.mark_failed("503 Service Unavailable")
-
-    assert bubble.is_error is True
-    assert "This was partially received before failing..." in bubble.raw_text
-    assert "⚠️ [Interrupted: 503 Service Unavailable]" in bubble.raw_text
-    assert not bubble.retry_btn.isHidden()
 
 
 def test_model_catalog_deprecation_filtering():

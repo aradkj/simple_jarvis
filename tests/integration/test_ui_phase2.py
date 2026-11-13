@@ -100,3 +100,18 @@ def test_main_window_new_chat_and_clear_chat(
     assert window.chat_panel.messages_layout.count() >= 2  # New conversation welcome banner
 
     window.close()
+
+
+def test_message_bubble_mark_failed_preserves_partial_content(qtbot: QtBot) -> None:
+    """Verify UI MessageBubble displays interrupted notice without wiping partial output."""
+    from ui.chat_panel import MessageBubble
+
+    bubble = MessageBubble(sender="JARVIS", text="", is_user=False)
+    qtbot.addWidget(bubble)
+    bubble.set_content("This was partially received before failing...")
+    bubble.mark_failed("503 Service Unavailable")
+
+    assert bubble.is_error is True
+    assert "This was partially received before failing..." in bubble.raw_text
+    assert "⚠️ [Interrupted: 503 Service Unavailable]" in bubble.raw_text
+    assert not bubble.retry_btn.isHidden()
