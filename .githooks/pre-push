@@ -1,0 +1,41 @@
+#!/bin/sh
+# JARVIS Git Pre-Push Hook
+# Ensures that code formatting, linting, and all unit/integration tests pass before allowing a push.
+
+echo "[JARVIS Pre-Push Hook] Running code quality and test verification before push..."
+
+# Detect project virtual environment
+if [ -f "./.venv/Scripts/python.exe" ]; then
+    PY="./.venv/Scripts/python.exe"
+elif [ -f "./.venv/bin/python" ]; then
+    PY="./.venv/bin/python"
+else
+    PY="python"
+fi
+
+# 1. Lint and format check
+echo "[1/3] Checking code style with Ruff..."
+$PY -m ruff check .
+if [ $? -ne 0 ]; then
+    echo "ERROR: Ruff lint check failed. Fix errors before pushing."
+    exit 1
+fi
+
+echo "[2/3] Checking formatting with Ruff..."
+$PY -m ruff format --check .
+if [ $? -ne 0 ]; then
+    echo "ERROR: Ruff formatting check failed. Run 'ruff format .' before pushing."
+    exit 1
+fi
+
+# 2. Test suite
+echo "[3/3] Running automated unit and integration tests..."
+export QT_QPA_PLATFORM=offscreen
+$PY -m pytest tests/unit tests/integration -q
+if [ $? -ne 0 ]; then
+    echo "ERROR: Test suite failed. Push aborted."
+    exit 1
+fi
+
+echo "[JARVIS Pre-Push Hook] All checks and tests passed (GREEN). Proceeding with push."
+exit 0
