@@ -11,11 +11,12 @@ from config import Settings, get_settings, reload_settings
 
 def test_default_configuration() -> None:
     """Verify default configuration has expected production-safe values."""
-    settings = Settings(_env_file=None)
-    assert settings.app_name == "JARVIS"
-    assert settings.app_env in ("development", "production", "testing")
-    assert settings.log_level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-    assert settings.is_gemini_configured() is False
+    with patch.dict(os.environ, {"GEMINI_API_KEY": ""}, clear=False):
+        settings = Settings(_env_file=None)
+        assert settings.app_name == "JARVIS"
+        assert settings.app_env in ("development", "production", "testing")
+        assert settings.log_level in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+        assert settings.is_gemini_configured() is False
 
 
 def test_environment_override() -> None:

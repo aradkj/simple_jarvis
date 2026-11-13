@@ -41,7 +41,6 @@ jobs:
     runs-on: windows-latest
     env:
       QT_QPA_PLATFORM: offscreen
-      GEMINI_API_KEY: "AIzaSyCiTestMockKey"
       APP_ENV: "testing"
     steps:
       - name: Check out repository

@@ -125,10 +125,16 @@ def test_audio_com_per_thread_initialization() -> None:
 
     assert len(result_container) == 1
     res = result_container[0]
-    # On Windows with an audio endpoint, must return AudioOperationResult without CO_E_NOTINITIALIZED
-    assert isinstance(res, (AudioOperationResult, AudioState)), (
-        f"Expected AudioState but got: {res}"
-    )
+    # On Windows with an audio endpoint, must return AudioOperationResult or AudioState.
+    # On headless CI runners without audio devices, GetDefaultAudioEndpoint raises AudioEndpointError,
+    # which confirms COM was successfully initialized and CoCreateInstance succeeded without CO_E_NOTINITIALIZED.
+    if isinstance(res, Exception):
+        assert isinstance(res, AudioEndpointError)
+        assert "CO_E_NOTINITIALIZED" not in str(res)
+    else:
+        assert isinstance(res, (AudioOperationResult, AudioState)), (
+            f"Expected AudioState but got: {res}"
+        )
 
 
 def test_audio_state_verification_failure_detection() -> None:
