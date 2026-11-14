@@ -154,7 +154,8 @@ class BrowserService:
                             with contextlib.suppress(Exception):
                                 new_p.close()
                             return
-                        self._pages.append(new_p)
+                        if not any(p is new_p for p in self._pages):
+                            self._pages.append(new_p)
 
                 self._context.on("page", handle_new_page)
 
@@ -786,8 +787,9 @@ class BrowserService:
 
             assert self._context is not None
             page = self._context.new_page()
-            self._pages.append(page)
-            self._active_page_index = len(self._pages) - 1
+            if not any(p is page for p in self._pages):
+                self._pages.append(page)
+            self._active_page_index = self._pages.index(page)
 
             if url:
                 self.navigate(url)

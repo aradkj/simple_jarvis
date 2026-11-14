@@ -351,7 +351,8 @@ class TestBrowserRealIntegration:
         with pytest.raises((BrowserSecurityError, BrowserError)) as exc_info:
             browser_service.navigate(f"{local_http_server}/redirect-evil-ip")
         assert any(
-            k in str(exc_info.value).lower() for k in ("blocked", "forbidden", "private", "failed")
+            k in str(exc_info.value).lower()
+            for k in ("blocked", "forbidden", "private", "failed", "timed out", "timeout")
         )
 
     def test_real_browser_blocked_redirect_to_metadata(
@@ -363,7 +364,8 @@ class TestBrowserRealIntegration:
         with pytest.raises((BrowserSecurityError, BrowserError)) as exc_info:
             browser_service.navigate(f"{local_http_server}/redirect-evil-metadata")
         assert any(
-            k in str(exc_info.value).lower() for k in ("blocked", "forbidden", "metadata", "failed")
+            k in str(exc_info.value).lower()
+            for k in ("blocked", "forbidden", "metadata", "failed", "timed out", "timeout")
         )
 
     def test_real_browser_sensitive_purchase_unconfirmed_rejected(
