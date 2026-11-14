@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,6 +17,7 @@ from tools.coding_agent.coding_tools import (
     CodingAgentVerifyTaskTool,
 )
 from tools.coding_agent.exceptions import (
+    AntigravityNotFoundError,
     WorkspacePolicyViolationError,
 )
 from tools.coding_agent.models import CodingTaskStatus, VerificationResult
@@ -139,19 +140,53 @@ class TestStreamParser:
 class TestProcessManagerAndHealth:
     """Tests for discovering agy CLI and health inspection."""
 
-    def test_locate_executable_or_fallback(self):
-        mgr = AntigravityProcessManager()
-        # On this machine agy.exe is installed, so it should locate it
+    def test_locate_executable_explicit_path(self, tmp_path: Path):
+        dummy_exe = tmp_path / "mock_agy.exe"
+        dummy_exe.touch()
+        mgr = AntigravityProcessManager(executable_path=str(dummy_exe))
         exe = mgr.locate_executable()
-        assert exe.exists()
-        assert "agy" in exe.name.lower()
+        assert exe == dummy_exe.resolve()
 
-    def test_check_health(self):
+    def test_locate_executable_via_path_lookup(self, tmp_path: Path):
+        dummy_exe = tmp_path / "agy.exe"
+        dummy_exe.touch()
+        with patch("shutil.which", return_value=str(dummy_exe)):
+            mgr = AntigravityProcessManager()
+            exe = mgr.locate_executable()
+            assert exe == dummy_exe.resolve()
+
+    def test_locate_executable_not_found_raises_error(self):
+        with (
+            patch("shutil.which", return_value=None),
+            patch.object(AntigravityProcessManager, "COMMON_AGY_PATHS", []),
+        ):
+            mgr = AntigravityProcessManager()
+            with pytest.raises(AntigravityNotFoundError) as exc:
+                mgr.locate_executable()
+            assert "could not be found" in str(exc.value)
+
+    def test_check_health_healthy(self):
         mgr = AntigravityProcessManager()
-        health = mgr.check_health()
-        assert health["installed"] is True
-        assert health["healthy"] is True
-        assert health["executable_path"] is not None
+        mock_path = Path("/mock/bin/agy")
+        with (
+            patch.object(mgr, "locate_executable", return_value=mock_path),
+            patch("subprocess.run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(returncode=0)
+            health = mgr.check_health()
+            assert health["installed"] is True
+            assert health["healthy"] is True
+            assert health["executable_path"] == str(mock_path)
+
+    def test_check_health_not_installed(self):
+        mgr = AntigravityProcessManager()
+        with patch.object(
+            mgr, "locate_executable", side_effect=AntigravityNotFoundError("CLI not installed")
+        ):
+            health = mgr.check_health()
+            assert health["installed"] is False
+            assert health["healthy"] is False
+            assert "CLI not installed" in health["error"]
 
 
 class TestCodingTaskManagerAndRemediation:
@@ -239,7 +274,22 @@ class TestCodingTools:
         res = tool.execute(CodingAgentStatusInput(), ctx)
         assert res.status == ToolExecutionStatus.SUCCESS
         assert "enabled" in res.data
-        assert res.data["installed"] is True
+        assert isinstance(res.data["installed"], bool)
+
+    def test_status_tool_with_mocked_installed_status(self):
+        tool = CodingAgentStatusTool()
+        ctx = ExecutionContext()
+        mock_health = {
+            "installed": True,
+            "healthy": True,
+            "executable_path": "/mock/bin/agy",
+            "return_code": 0,
+        }
+        with patch.object(AntigravityProcessManager, "check_health", return_value=mock_health):
+            res = tool.execute(CodingAgentStatusInput(), ctx)
+            assert res.status == ToolExecutionStatus.SUCCESS
+            assert res.data["installed"] is True
+            assert res.data["executable_path"] == "/mock/bin/agy"
 
     def test_verify_tool(self):
         tool = CodingAgentVerifyTaskTool()
