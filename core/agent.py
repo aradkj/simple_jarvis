@@ -9,6 +9,10 @@ from ai.base import BaseAIProvider
 from ai.manager import ProviderManager
 from config import Settings, get_settings
 from core.approval import ApprovalManager
+from core.conversation_session import (
+    ConversationSessionManager,
+    get_conversation_session_manager,
+)
 from core.events import AgentEvent, AgentEventType, EventBus
 from core.execution_context import ExecutionContext
 from core.executor import AgentExecutor, ExecutionOutcome
@@ -17,9 +21,15 @@ from core.permissions import (
     PermissionCategory,
     StrictDefaultDenyPermissionManager,
 )
+from core.personality import JarvisPersonalityEngine
 from core.planner import AgentPlanner, Plan
 from core.state_machine import AgentState, AgentStateMachine
 from core.task_manager import TaskManager
+from core.task_orchestrator import (
+    TaskLifecycleState,
+    UnifiedTaskOrchestrator,
+    VerificationState,
+)
 from core.tool_proposal import ToolProposal
 from core.tool_registry import ToolRegistry
 from infrastructure.logging import get_logger
@@ -28,11 +38,23 @@ from memory.database import SQLiteMemoryStore
 from memory.manager import MemoryManager
 from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
 from tools.base import BaseTool
+from tools.capability_registry import (
+    CapabilityRegistry,
+    get_capability_registry,
+)
 from tools.coding_agent import (
     CodingAgentDelegateTaskTool,
     CodingAgentGetTaskStatusTool,
     CodingAgentStatusTool,
     CodingAgentVerifyTaskTool,
+)
+from tools.communication import (
+    EmailComposeTool,
+    EmailSendTool,
+    EmailStatusTool,
+    WhatsAppComposeTool,
+    WhatsAppSendTool,
+    WhatsAppStatusTool,
 )
 from tools.filesystem import (
     DirectoryListTool,
@@ -68,6 +90,12 @@ from tools.system import (
 from tools.terminal import (
     TerminalExecuteCommandTool,
     TerminalListCommandsTool,
+)
+from tools.voice import (
+    ConversationalVoicePipeline,
+    VoiceMuteTool,
+    VoiceSpeakTool,
+    VoiceStatusTool,
 )
 from tools.windows import (
     WindowsAppCloseTool,
@@ -172,6 +200,26 @@ class JARVISAgent:
                 }
             )
 
+        # Phase 9 Voice Intelligence Permissions
+        if getattr(self.settings, "voice_enabled", True):
+            allowed_categories.add(PermissionCategory.VOICE_CONTROL)
+
+        # Phase 9 Email & WhatsApp Communication Permissions
+        if getattr(self.settings, "email_enabled", True):
+            allowed_categories.update(
+                {
+                    PermissionCategory.EMAIL_COMPOSE,
+                    PermissionCategory.EMAIL_SEND,
+                }
+            )
+        if getattr(self.settings, "whatsapp_enabled", True):
+            allowed_categories.update(
+                {
+                    PermissionCategory.WHATSAPP_COMPOSE,
+                    PermissionCategory.WHATSAPP_SEND,
+                }
+            )
+
         self.permission_manager = permission_manager or StrictDefaultDenyPermissionManager(
             allowed_categories=allowed_categories
         )
@@ -187,6 +235,13 @@ class JARVISAgent:
 
         self._current_context = ExecutionContext()
         self._active_session_id: str = self._current_context.session_id
+
+        # Phase 10 Multi-Turn Session & Persistent Task Orchestration
+        self.session_manager: ConversationSessionManager = get_conversation_session_manager()
+        self.task_orchestrator: UnifiedTaskOrchestrator = UnifiedTaskOrchestrator(
+            event_bus=self.event_bus
+        )
+        self.capability_registry: CapabilityRegistry = get_capability_registry()
 
         # Phase 3 Deterministic State Machine
         self.state_machine = AgentStateMachine(
@@ -218,8 +273,42 @@ class JARVISAgent:
             event_bus=self.event_bus,
         )
 
+        # Phase 9 Voice Intelligence Pipeline
+        self.voice_pipeline: ConversationalVoicePipeline | None = None
+        if getattr(self.settings, "voice_enabled", True):
+            try:
+                self.voice_pipeline = ConversationalVoicePipeline(event_bus=self.event_bus)
+                self.voice_pipeline.set_command_callback(self._on_voice_command)
+            except Exception as v_exc:
+                logger.warning(f"Voice pipeline initialization bypassed: {v_exc}")
+
         # Register standard simulated mock tools and Phase 4 real tools
         self._register_default_tools()
+
+    def _on_voice_command(self, text: str, transcript: Any) -> None:
+        """Handle incoming spoken instruction from voice pipeline."""
+        if self.event_bus and self.event_bus.has_subscribers(AgentEventType.VOICE_TRANSCRIPT_READY):
+            logger.debug(
+                "Voice command handled by registered EventBus UI subscriber; skipping direct agent invocation."
+            )
+            return
+
+        logger.info(f"Processing spoken command: '{text}'")
+        try:
+            outcome = self.process_agent_task(goal=text, session_id=self._active_session_id)
+            if self.voice_pipeline and outcome.final_response:
+                policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
+                explicit_fa = JarvisPersonalityEngine.detect_explicit_persian_request(text)
+                if explicit_fa or policy == "PERSIAN":
+                    spoken_text = outcome.final_response
+                else:
+                    spoken_text = JarvisPersonalityEngine.format_spoken_response_en(
+                        text=outcome.final_response,
+                        user_prompt=text,
+                    )
+                self.voice_pipeline.speak(spoken_text)
+        except Exception as exc:
+            logger.error(f"Spoken command execution failed: {exc}")
 
     def _register_default_tools(self) -> None:
         """Register deterministic mock tools and Phase 4 Windows system/file inspection tools."""
@@ -395,6 +484,36 @@ class JARVISAgent:
                     CodingAgentDelegateTaskTool(),
                     CodingAgentGetTaskStatusTool(),
                     CodingAgentVerifyTaskTool(),
+                ]
+            )
+
+        # 9. Phase 9 Voice Intelligence Tools
+        if getattr(self.settings, "voice_enabled", True):
+            default_tools.extend(
+                [
+                    VoiceStatusTool(self.voice_pipeline),
+                    VoiceSpeakTool(self.voice_pipeline),
+                    VoiceMuteTool(self.voice_pipeline),
+                ]
+            )
+
+        # 10. Phase 9 Email Integration Tools
+        if getattr(self.settings, "email_enabled", True):
+            default_tools.extend(
+                [
+                    EmailComposeTool(),
+                    EmailSendTool(),
+                    EmailStatusTool(),
+                ]
+            )
+
+        # 11. Phase 9 WhatsApp Integration Tools
+        if getattr(self.settings, "whatsapp_enabled", True):
+            default_tools.extend(
+                [
+                    WhatsAppComposeTool(),
+                    WhatsAppSendTool(),
+                    WhatsAppStatusTool(),
                 ]
             )
 
@@ -590,8 +709,91 @@ class JARVISAgent:
         ctx = context or self._current_context
         ctx.session_id = active_session
 
-        # 1. State: ANALYZING
+        # 1. State: ANALYZING (Ensure clean state transition from current state)
+        if self.state_machine.current_state != AgentState.IDLE:
+            if self.state_machine.can_transition(AgentState.ANALYZING):
+                pass
+            elif self.state_machine.can_transition(AgentState.IDLE):
+                self.state_machine.transition_to(
+                    AgentState.IDLE, reason="Reset to idle before task analysis"
+                )
+            else:
+                self.state_machine.reset(new_session_id=active_session)
+
         self.state_machine.transition_to(AgentState.ANALYZING, reason="Analyzing user goal")
+
+        # Phase 9 & 10: Conversational Reference Resolution & Contextual Tracking
+        history = self.get_session_history(session_id=active_session)
+        resolved_goal, inferred = JarvisPersonalityEngine.resolve_references(
+            goal, history, session_id=active_session
+        )
+
+        # Phase 10: Persistent Unified Task Orchestration Checkpoint
+        orchestrated_task = self.task_orchestrator.create_task(
+            goal=resolved_goal,
+            session_id=active_session,
+            metadata={
+                "raw_goal": goal,
+                "inferred": inferred,
+                "intent": inferred.get("intent_type", "action_execution"),
+                "active_project": inferred.get("active_project"),
+            },
+        )
+        self.task_orchestrator.transition_task(
+            orchestrated_task.task_id,
+            TaskLifecycleState.UNDERSTANDING,
+            reason="Analyzing user intent and resolving conversational context",
+        )
+
+        # Phase 10 Security Boundary: Hypothetical Discussion Protection
+        # Never formulate or execute destructive tools from speculative/hypothetical exploration
+        if inferred.get("is_hypothetical"):
+            self.state_machine.transition_to(
+                AgentState.EXECUTING, reason="Addressing hypothetical exploration"
+            )
+            hypo_prompt = (
+                "The user is asking a hypothetical exploration, discussion, or 'what if' question. "
+                "Explain what would happen, architectural considerations, risks, or approach theoretically. "
+                "Do not execute any tools, do not authorize destructive actions, and do not claim actions were executed.\n\n"
+                f"User Discussion: {resolved_goal}"
+            )
+            resp = self.ai_provider.generate_text(prompt=hypo_prompt, history=history)
+            self.state_machine.transition_to(
+                AgentState.COMPLETED, reason="Hypothetical analysis completed"
+            )
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.COMPLETED,
+                reason="Hypothetical discussion delivered without execution",
+            )
+            plan = Plan(goal=resolved_goal, session_id=active_session)
+            return ExecutionOutcome(
+                status="completed",
+                plan=plan,
+                final_response=resp.text,
+                steps_executed=0,
+            )
+
+        if inferred.get("needs_clarification"):
+            clarification_msg = inferred.get(
+                "clarification_prompt", "لطفاً اطلاعات تکمیلی را بفرمایید."
+            )
+            self.state_machine.transition_to(
+                AgentState.WAITING_FOR_INPUT,
+                reason="Missing information requires user clarification",
+            )
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.WAITING_FOR_INPUT,
+                reason="User clarification requested",
+            )
+            plan = Plan(goal=resolved_goal, session_id=active_session)
+            return ExecutionOutcome(
+                status="waiting_for_input",
+                plan=plan,
+                final_response=clarification_msg,
+                steps_executed=0,
+            )
 
         # Phase 5: Retrieve relevant memories and build bounded context safely
         if (
@@ -601,14 +803,14 @@ class JARVISAgent:
         ):
             try:
                 ctx.memory_context = self.memory_manager.build_memory_context(
-                    query=goal, project_id=ctx.project_id, for_cloud_transmission=True
+                    query=resolved_goal, project_id=ctx.project_id, for_cloud_transmission=True
                 )
             except Exception as exc:
                 logger.warning(f"Memory context retrieval encountered safe error: {exc}")
                 ctx.memory_context = ""
 
         # 2. Check if planning is required
-        needs_plan = self.planner.should_plan(goal)
+        needs_plan = self.planner.should_plan(resolved_goal)
         available_tool_defs = [
             t.get_definition()
             for t in self.tool_registry.list_tools()
@@ -620,47 +822,137 @@ class JARVISAgent:
             self.state_machine.transition_to(
                 AgentState.EXECUTING, reason="Executing single-turn conversational reply"
             )
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.EXECUTING,
+                reason="Direct conversational response",
+            )
             try:
-                history = self.get_session_history(session_id=active_session)
-                effective_prompt = f"{ctx.memory_context}\n\n{goal}" if ctx.memory_context else goal
+                effective_prompt = (
+                    f"{ctx.memory_context}\n\n{resolved_goal}"
+                    if ctx.memory_context
+                    else resolved_goal
+                )
                 resp = self.ai_provider.generate_text(prompt=effective_prompt, history=history)
                 self.state_machine.transition_to(
                     AgentState.COMPLETED, reason="Direct reply finished"
                 )
-                plan = Plan(goal=goal, session_id=active_session)
+                self.task_orchestrator.transition_task(
+                    orchestrated_task.task_id,
+                    TaskLifecycleState.COMPLETED,
+                    reason="Direct reply delivered",
+                )
+                plan = Plan(goal=resolved_goal, session_id=active_session)
                 return ExecutionOutcome(
                     status="completed", plan=plan, final_response=resp.text, steps_executed=1
                 )
             except Exception as exc:
                 self.state_machine.transition_to(AgentState.FAILED, reason=str(exc))
-                plan = Plan(goal=goal, session_id=active_session)
+                self.task_orchestrator.transition_task(
+                    orchestrated_task.task_id,
+                    TaskLifecycleState.FAILED,
+                    reason=str(exc),
+                )
+                plan = Plan(goal=resolved_goal, session_id=active_session)
                 return ExecutionOutcome(status="failed", plan=plan, error=str(exc))
 
         # 3. State: PLANNING
         self.state_machine.transition_to(AgentState.PLANNING, reason="Decomposing multi-step task")
-        history = self.get_session_history(session_id=active_session)
+        self.task_orchestrator.transition_task(
+            orchestrated_task.task_id,
+            TaskLifecycleState.PLANNING,
+            reason="Decomposing multi-step task",
+        )
 
         try:
             plan = self.planner.create_plan(
-                goal=goal,
+                goal=resolved_goal,
                 context=ctx,
                 available_tools=available_tool_defs,
                 history=history,
             )
         except Exception as exc:
             self.state_machine.transition_to(AgentState.FAILED, reason=f"Planning failed: {exc}")
-            empty_plan = Plan(goal=goal, session_id=active_session)
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.FAILED,
+                reason=f"Planning failed: {exc}",
+            )
+            empty_plan = Plan(goal=resolved_goal, session_id=active_session)
             return ExecutionOutcome(status="failed", plan=empty_plan, error=str(exc))
 
         # 4. State: PLAN_READY
         self.state_machine.transition_to(
             AgentState.PLAN_READY, reason="Plan generated and validated"
         )
+        self.task_orchestrator.transition_task(
+            orchestrated_task.task_id,
+            TaskLifecycleState.READY,
+            reason="Plan generated and validated",
+        )
 
         # 5. State: EXECUTING
+        self.task_orchestrator.transition_task(
+            orchestrated_task.task_id,
+            TaskLifecycleState.EXECUTING,
+            reason="Executing plan steps",
+        )
         outcome = self.executor.execute_plan(
             plan=plan, context=ctx, wait_for_approval=wait_for_approval
         )
+
+        # Phase 10: Task Verification and Lifecycle Settlement
+        if outcome.status == "completed":
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.VERIFYING,
+                reason="Verifying execution outcomes",
+            )
+            self.task_orchestrator.record_verification(
+                task_id=orchestrated_task.task_id,
+                step_id=f"step_{outcome.steps_executed}",
+                action_name="plan_execution",
+                state=VerificationState.VERIFIED,
+                evidence_summary=f"Executed {outcome.steps_executed} steps successfully.",
+                verified=True,
+            )
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.COMPLETED,
+                reason="All planned steps executed and verified",
+            )
+        elif outcome.status == "waiting_for_approval":
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.WAITING_FOR_APPROVAL,
+                reason="Awaiting user authorization",
+            )
+        elif outcome.status == "failed":
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.FAILED,
+                reason=outcome.error or "Plan execution failed",
+            )
+        elif outcome.status == "cancelled":
+            self.task_orchestrator.transition_task(
+                orchestrated_task.task_id,
+                TaskLifecycleState.CANCELLED,
+                reason="Task cancelled by user or system",
+            )
+
+        policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
+        if inferred.get("explicit_persian_requested") or policy == "PERSIAN":
+            target_lang = "fa"
+        elif policy == "FOLLOW_USER":
+            target_lang = inferred.get("language_override") or self.settings.app_language
+        else:
+            # DEFAULT_ENGLISH: responds in British English
+            target_lang = "en"
+
+        if not outcome.final_response and outcome.status == "completed":
+            outcome.final_response = JarvisPersonalityEngine.format_truthful_response(
+                outcome, language=target_lang
+            )
         return outcome
 
     def submit_approval_decision(
@@ -809,6 +1101,11 @@ class JARVISAgent:
                 self.browser_service.close()
             except Exception as exc:
                 logger.warning(f"Error closing browser service: {exc}")
+        if self.voice_pipeline:
+            try:
+                self.voice_pipeline.stop_audio_capture()
+            except Exception as exc:
+                logger.warning(f"Error stopping voice pipeline capture: {exc}")
         try:
             self.memory_manager.close()
         except Exception as exc:

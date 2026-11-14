@@ -48,6 +48,13 @@ class PermissionCategory(StrEnum):
     CODING_AGENT_DELEGATE = "coding_agent_delegate"
     CODING_AGENT_VERIFY = "coding_agent_verify"
 
+    # Phase 9 Voice Intelligence & Unified Communication Layer
+    VOICE_CONTROL = "voice_control"
+    EMAIL_COMPOSE = "email_compose"
+    EMAIL_SEND = "email_send"
+    WHATSAPP_COMPOSE = "whatsapp_compose"
+    WHATSAPP_SEND = "whatsapp_send"
+
 
 class PermissionDecision(StrEnum):
     """Possible outcomes of a permission evaluation."""

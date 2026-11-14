@@ -481,6 +481,197 @@ class Settings(BaseSettings):
         description="Explicit allowlist of canonical directory paths Antigravity is authorized to modify",
     )
 
+    # Phase 9 Voice Intelligence Settings
+    voice_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 9 Voice Intelligence subsystem (input, VAD, STT, TTS)",
+    )
+    voice_wake_word: str = Field(
+        default="Jarvis",
+        description="Activation wake word (default: 'Jarvis')",
+    )
+    voice_wake_word_enabled: bool = Field(
+        default=False,
+        description="Enable continuous acoustic wake-word listening (Push-To-Talk is default)",
+    )
+    voice_continuous_listening: bool = Field(
+        default=False,
+        description="Whether voice input stays listening continuously after activation",
+    )
+    voice_input_device: str = Field(
+        default="",
+        description="Selected audio capture device description (empty for system default)",
+    )
+    voice_output_device: str = Field(
+        default="",
+        description="Selected audio playback device description (empty for system default)",
+    )
+    voice_vad_energy_threshold: float = Field(
+        default=0.015,
+        ge=0.001,
+        le=0.5,
+        description="RMS energy threshold for Voice Activity Detection",
+    )
+    voice_silence_timeout_seconds: float = Field(
+        default=1.8,
+        ge=0.5,
+        le=10.0,
+        description="Duration of silence in seconds before speech is considered finished",
+    )
+    voice_speech_timeout_seconds: float = Field(
+        default=15.0,
+        ge=2.0,
+        le=60.0,
+        description="Maximum seconds of speech captured per turn",
+    )
+    voice_stt_language: str = Field(
+        default="auto",
+        description="Preferred language for STT recognition ('auto', 'fa', or 'en')",
+    )
+    voice_cloud_stt_consent: bool = Field(
+        default=False,
+        description="Explicit user consent for cloud-assisted speech transcription (Gemini multimodal). Disabled by default.",
+    )
+    voice_cloud_tts_consent: bool = Field(
+        default=False,
+        description="Explicit user consent for cloud speech synthesis (Azure Neural / OpenAI Speech). Disabled by default.",
+    )
+    voice_tts_enabled: bool = Field(
+        default=True,
+        description="Enable speech synthesis for agent responses",
+    )
+    voice_allow_tts_fallback_to_english: bool = Field(
+        default=False,
+        description="Whether to permit English voice fallback when no native Persian voice is installed",
+    )
+    voice_tts_engine: str = Field(
+        default="elevenlabs",
+        description="TTS engine implementation ('elevenlabs', 'azure_neural', 'sapi', 'winrt', 'openai_speech', 'mock')",
+    )
+    voice_tts_voice: str = Field(
+        default="",
+        description="Selected TTS voice identifier or name (empty for engine default)",
+    )
+    voice_british_voice: str = Field(
+        default="en-GB-OliverNeural",
+        description="Preferred British English neural voice ('en-GB-OliverNeural', 'en-GB-Ryan:DragonHDLatestNeural', 'en-GB-RyanNeural', 'fable', 'onyx')",
+    )
+    voice_response_language: str = Field(
+        default="en",
+        description="Spoken voice response language ('en' for British English, 'fa' for Persian, 'match')",
+    )
+    # Phase 10 ElevenLabs Voice & Speech Settings
+    elevenlabs_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="ElevenLabs API Key for British English Neural Voice",
+    )
+    elevenlabs_voice_id: str = Field(
+        default="JBFqnCBsd6RMkjVDRZzb",
+        description="ElevenLabs Voice ID (default: 'JBFqnCBsd6RMkjVDRZzb' - George, British mature male)",
+    )
+    elevenlabs_model_id: str = Field(
+        default="eleven_multilingual_v2",
+        description="ElevenLabs Model ID ('eleven_multilingual_v2' or 'eleven_turbo_v2_5')",
+    )
+    elevenlabs_output_format: str = Field(
+        default="mp3_44100_128",
+        description="ElevenLabs audio output format ('mp3_44100_128', 'pcm_16000')",
+    )
+    elevenlabs_stability: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="ElevenLabs voice stability setting (0.0 to 1.0)",
+    )
+    elevenlabs_similarity_boost: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description="ElevenLabs voice clarity and similarity boost (0.0 to 1.0)",
+    )
+    elevenlabs_style: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="ElevenLabs style exaggeration setting (0.0 to 1.0)",
+    )
+    elevenlabs_use_speaker_boost: bool = Field(
+        default=True,
+        description="ElevenLabs speaker boost enhancement",
+    )
+    response_language_policy: str = Field(
+        default="DEFAULT_ENGLISH",
+        description="Response language policy: 'DEFAULT_ENGLISH' (British English default for Persian input unless Persian explicitly requested), 'PERSIAN' (always Persian), 'FOLLOW_USER' (match user language)",
+    )
+    azure_speech_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Azure Cognitive Services Speech API Key for neural British voices",
+    )
+    azure_speech_region: str = Field(
+        default="eastus",
+        description="Azure Cognitive Services Speech Region (e.g. 'eastus', 'westeurope')",
+    )
+    voice_tts_rate: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=3.0,
+        description="TTS speech rate multiplier",
+    )
+    voice_tts_volume: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="TTS speech volume level (0.0 to 1.0)",
+    )
+    voice_barge_in_enabled: bool = Field(
+        default=True,
+        description="Immediately interrupt and cancel TTS when user starts speaking",
+    )
+
+    # Phase 9 Communication Settings (Email & WhatsApp)
+    email_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 9 Email integration subsystem (Gmail REST & MS Graph)",
+    )
+    email_default_provider: str = Field(
+        default="gmail",
+        description="Default email provider ('gmail' or 'msgraph')",
+    )
+    email_require_approval: bool = Field(
+        default=True,
+        description="Require explicit human preview & approval before sending emails",
+    )
+    email_max_attachment_size_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        ge=1024,
+        le=100 * 1024 * 1024,
+        description="Maximum cumulative attachment size in bytes (25MB default)",
+    )
+    whatsapp_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 9 WhatsApp Cloud API messaging integration",
+    )
+    whatsapp_require_approval: bool = Field(
+        default=True,
+        description="Require explicit human preview & approval before sending WhatsApp messages",
+    )
+    whatsapp_phone_number_id: str = Field(
+        default="",
+        description="Configured Meta WhatsApp Cloud API Phone Number ID",
+    )
+    whatsapp_self_phone_number: str = Field(
+        default="",
+        description="Verified phone number for 'send to myself' instructions (E.164 format)",
+    )
+    whatsapp_api_version: str = Field(
+        default="v21.0",
+        description="Meta Graph API version for WhatsApp Cloud API",
+    )
+    whatsapp_enforce_24h_window: bool = Field(
+        default=False,
+        description="Enforce Meta 24-hour customer service window policy for free-form messages",
+    )
+
     # Storage and Log Directories
     data_dir: Path = Field(default_factory=get_data_dir, description="Persistent data storage path")
     logs_dir: Path = Field(default_factory=get_logs_dir, description="Log files destination path")

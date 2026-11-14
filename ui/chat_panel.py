@@ -118,17 +118,56 @@ class ApprovalCardWidget(QFrame):
 
         # Parameters / Arguments
         if self.arguments:
-            args_label = QLabel("Proposed Parameters:")
-            args_label.setStyleSheet("color: #9a9996; font-size: 12px;")
-            layout.addWidget(args_label)
+            if self.tool_name in ("email_send", "whatsapp_send"):
+                preview_title = (
+                    "📧 Email Send Preview:"
+                    if self.tool_name == "email_send"
+                    else "💬 WhatsApp Send Preview:"
+                )
+                args_label = QLabel(preview_title)
+                args_label.setStyleSheet("color: #3584e4; font-weight: bold; font-size: 13px;")
+                layout.addWidget(args_label)
 
-            args_text = "\n".join(f"  • {k}: {v}" for k, v in self.arguments.items())
-            args_display = QLabel(args_text)
-            args_display.setWordWrap(True)
-            args_display.setStyleSheet(
-                "background-color: #1e1e1e; color: #33d17a; padding: 6px; border-radius: 4px; font-family: monospace;"
-            )
-            layout.addWidget(args_display)
+                preview_box = QFrame()
+                preview_box.setStyleSheet(
+                    "background-color: #1a1a1a; border: 1px solid #3584e4; border-radius: 6px; padding: 10px;"
+                )
+                p_layout = QVBoxLayout(preview_box)
+                p_layout.setSpacing(6)
+
+                if "to" in self.arguments:
+                    to_val = self.arguments["to"]
+                    to_str = ", ".join(to_val) if isinstance(to_val, list) else str(to_val)
+                    p_layout.addWidget(QLabel(f"<b>To:</b> {to_str}"))
+                if "recipient" in self.arguments:
+                    p_layout.addWidget(QLabel(f"<b>Recipient:</b> {self.arguments['recipient']}"))
+                if "subject" in self.arguments:
+                    p_layout.addWidget(QLabel(f"<b>Subject:</b> {self.arguments['subject']}"))
+                if "body_text" in self.arguments:
+                    body_lbl = QLabel(f"<b>Message Body:</b>\n{self.arguments['body_text']}")
+                    body_lbl.setWordWrap(True)
+                    p_layout.addWidget(body_lbl)
+                elif "message_text" in self.arguments:
+                    body_lbl = QLabel(f"<b>Message Text:</b>\n{self.arguments['message_text']}")
+                    body_lbl.setWordWrap(True)
+                    p_layout.addWidget(body_lbl)
+                if self.arguments.get("attachment_paths"):
+                    att_str = ", ".join(self.arguments["attachment_paths"])
+                    p_layout.addWidget(QLabel(f"<b>Attachments:</b> {att_str}"))
+
+                layout.addWidget(preview_box)
+            else:
+                args_label = QLabel("Proposed Parameters:")
+                args_label.setStyleSheet("color: #9a9996; font-size: 12px;")
+                layout.addWidget(args_label)
+
+                args_text = "\n".join(f"  • {k}: {v}" for k, v in self.arguments.items())
+                args_display = QLabel(args_text)
+                args_display.setWordWrap(True)
+                args_display.setStyleSheet(
+                    "background-color: #1e1e1e; color: #33d17a; padding: 6px; border-radius: 4px; font-family: monospace;"
+                )
+                layout.addWidget(args_display)
 
         # Action Buttons: Approve / Reject
         btn_layout = QHBoxLayout()

@@ -134,6 +134,19 @@ class ToolCall:
 
 
 @dataclass
+class AudioTranscriptionResult:
+    """Standardized result of an AI audio speech-to-text transcription."""
+
+    text: str
+    language: str = "en"
+    confidence: float = 1.0
+    is_ambiguous: bool = False
+    duration_seconds: float = 0.0
+    error: str | None = None
+    raw_response: Any = None
+
+
+@dataclass
 class AIResponse:
     """Standardized response from an AI provider."""
 
@@ -310,3 +323,22 @@ class BaseAIProvider(ABC):
     ) -> AsyncIterator[str]:
         """Asynchronously stream text tokens."""
         raise NotImplementedError
+
+    def transcribe_audio(
+        self,
+        audio_data: bytes,
+        mime_type: str = "audio/wav",
+        language: str = "auto",
+        prompt: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        **kwargs: Any,
+    ) -> AudioTranscriptionResult:
+        """Provider-neutral audio transcription method.
+
+        Raises:
+            CapabilityNotSupportedError: If this provider does not support audio transcription.
+        """
+        raise CapabilityNotSupportedError(
+            f"Provider '{self.provider_id}' does not support audio transcription.",
+            provider_id=self.provider_id,
+        )

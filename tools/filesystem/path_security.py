@@ -178,7 +178,19 @@ class PathSecurityService:
         settings = get_settings()
         self.storage_path = storage_path or (settings.data_dir / "authorized_directories.json")
         self._directories: dict[str, AuthorizedDirectory] = {}
+        self._scoped_operations: set[tuple[str, str]] = set()
         self._load()
+
+    def authorize_temporary_operation(self, path: Path | str, operation: str = "write") -> None:
+        """Explicitly authorize a transient operation on a specific path without expanding permanent authorized directories."""
+        with self._lock:
+            canonical = str(Path(path).resolve()).lower()
+            self._scoped_operations.add((canonical, operation.lower()))
+
+    def clear_temporary_authorizations(self) -> None:
+        """Clear all transient operation-scoped authorizations."""
+        with self._lock:
+            self._scoped_operations.clear()
 
     def _load(self) -> None:
         with self._lock:
@@ -251,6 +263,19 @@ class PathSecurityService:
             self._directories.clear()
             self._save()
 
+    def ensure_desktop_authorized(self) -> AuthorizedDirectory | None:
+        """Ensure the user's Desktop directory is authorized."""
+        with self._lock:
+            try:
+                from infrastructure.paths import get_desktop_dir
+
+                desktop = get_desktop_dir()
+                if desktop.exists() and desktop.is_dir():
+                    return self.add_directory(str(desktop), display_name="Desktop")
+            except Exception as exc:
+                logger.debug(f"Unable to auto-authorize Desktop: {exc}")
+            return None
+
     def list_authorized_directories(self) -> list[AuthorizedDirectory]:
         """Return all active authorized directories."""
         with self._lock:
@@ -274,7 +299,7 @@ class PathSecurityService:
         """Check if file text contains unencrypted private key markers."""
         return any(marker in text for marker in self.PRIVATE_KEY_MARKERS)
 
-    def validate_and_resolve_path(self, requested_path: str) -> Path:
+    def validate_and_resolve_path(self, requested_path: str, operation: str = "write") -> Path:
         """Strictly validate that requested_path resides within an authorized directory.
 
         Protects against:
@@ -284,6 +309,9 @@ class PathSecurityService:
         - Symlink/junction escape outside authorized boundary
         - UNC paths and alternate data streams (':$DATA')
         - Sensitive files (.env, keys, credentials)
+        - Desktop directory scoping: arbitrary reads, deletes, copies, moves on Desktop
+          are blocked under Strict Default-Deny unless Desktop is authorized or the operation
+          is explicitly scoped.
         """
         # 1. Reject Alternate Data Streams and null bytes
         if ":" in Path(requested_path).name or "\x00" in requested_path:
@@ -303,11 +331,6 @@ class PathSecurityService:
 
         # 4. Enforce containment within at least one active authorized directory
         active_dirs = self.list_authorized_directories()
-        if not active_dirs:
-            raise PermissionError(
-                "Access denied: No directories are authorized for file access. "
-                "Please authorize the target directory in Settings or via User Confirmation."
-            )
 
         authorized_root: Path | None = None
         for auth_dir in active_dirs:
@@ -319,7 +342,47 @@ class PathSecurityService:
             except ValueError:
                 continue
 
+        # If not inside an already authorized directory, check if target_path is within the user's Desktop.
+        # Explicit user requests targeting a file within Desktop boundary are validated for this target operation
+        # only, without silently expanding permanent permissions in authorized_directories.json.
         if not authorized_root:
+            try:
+                from infrastructure.paths import get_desktop_dir
+
+                desktop_dir = get_desktop_dir()
+                try:
+                    target_path.relative_to(desktop_dir)
+                    op_norm = operation.lower()
+                    canonical_key = (str(target_path).lower(), op_norm)
+                    is_scoped = canonical_key in self._scoped_operations
+
+                    if is_scoped:
+                        authorized_root = desktop_dir
+                    elif op_norm == "write" and not target_path.exists():
+                        # Explicit new file creation targeting Desktop is allowed for that operation only
+                        authorized_root = desktop_dir
+                    elif op_norm == "write" and target_path.exists():
+                        raise PermissionError(
+                            f"Access denied: Overwriting existing file '{target_path.name}' on Desktop requires explicit authorization."
+                        )
+                    else:
+                        raise PermissionError(
+                            f"Access denied: Desktop directory is not authorized for '{operation}' operations under Strict Default-Deny. "
+                            f"Explicit directory authorization in Settings is required."
+                        )
+                except ValueError:
+                    pass
+            except PermissionError:
+                raise
+            except Exception as exc:
+                logger.debug(f"Unable to resolve Desktop path for containment check: {exc}")
+
+        if not authorized_root:
+            if not active_dirs:
+                raise PermissionError(
+                    "Access denied: No directories are authorized for file access. "
+                    "Please authorize the target directory in Settings or via User Confirmation."
+                )
             raise PermissionError(
                 f"Access denied: Path '{requested_path}' is outside all authorized directories."
             )

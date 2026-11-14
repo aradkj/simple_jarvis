@@ -23,6 +23,24 @@ class CodingResultVerifier:
     ) -> VerificationResult:
         """Perform full independent verification of the workspace."""
         changed_files, diff_summary = self._check_git_status_and_diff()
+
+        # Validate modified files against least-privilege security policy
+        from tools.coding_agent.exceptions import WorkspacePolicyViolationError
+        from tools.coding_agent.workspace_policy import WorkspacePolicy
+
+        try:
+            WorkspacePolicy.validate_modified_files(self.workspace, changed_files)
+        except WorkspacePolicyViolationError as sec_err:
+            logger.error(f"Security policy violation in workspace diff: {sec_err}")
+            return VerificationResult(
+                verified=False,
+                git_changed_files=changed_files,
+                git_diff_summary=diff_summary,
+                tests_executed=False,
+                tests_passed=False,
+                message=f"Security Policy Violation: {sec_err}",
+            )
+
         tests_executed = False
         tests_passed = True
         test_output = ""

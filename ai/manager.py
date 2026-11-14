@@ -10,6 +10,7 @@ from typing import Any
 
 from ai.base import (
     AIResponse,
+    AudioTranscriptionResult,
     BaseAIProvider,
     CapabilityNotSupportedError,
     ConnectionTestResult,
@@ -765,3 +766,40 @@ class ProviderManager(BaseAIProvider):
                 current_model = next_model
                 tried_providers.append(current_id)
                 tried_configs.append((current_id, current_model))
+
+    def transcribe_audio(
+        self,
+        audio_data: bytes,
+        mime_type: str = "audio/wav",
+        language: str = "auto",
+        prompt: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        **kwargs: Any,
+    ) -> AudioTranscriptionResult:
+        """Transcribe audio using the active AI provider through ProviderManager boundary.
+
+        Enforces:
+        - Cancellation token checking.
+        - Privacy policy enforcement.
+        - No silent cross-provider fallback for audio: if the active provider does not support
+          audio transcription, raises CapabilityNotSupportedError directly.
+        """
+        if cancellation_token and cancellation_token.is_cancelled():
+            raise ProviderCancelledError("Audio transcription cancelled before invocation.")
+
+        session_id = kwargs.get("session_id")
+        provider_id = kwargs.get("provider_id") or self.get_active_provider_id(session_id)
+        provider = self.registry.get_provider(provider_id)
+        if not provider:
+            raise UnknownProviderError(
+                f"Provider '{provider_id}' is not configured.", provider_id=provider_id
+            )
+
+        return provider.transcribe_audio(
+            audio_data=audio_data,
+            mime_type=mime_type,
+            language=language,
+            prompt=prompt,
+            cancellation_token=cancellation_token,
+            **kwargs,
+        )

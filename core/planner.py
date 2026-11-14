@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from ai.manager import ProviderManager
@@ -332,6 +333,42 @@ class AgentPlanner:
             "شبکه",
             "فایل",
             "پوشه",
+            "create",
+            "save",
+            "edit",
+            "delete",
+            "copy",
+            "move",
+            "desktop",
+            "html",
+            "ایجاد",
+            "بساز",
+            "ویرایش",
+            "حذف",
+            "کپی",
+            "جابجا",
+            "دسکتاپ",
+            "میزکار",
+            # Software Project & Coding (Phase 8 & 10)
+            "پروژه",
+            "project",
+            "ریپو",
+            "repo",
+            "تستهاشو",
+            "تست هاشو",
+            "تست‌هاشو",
+            "تستها",
+            "تست‌ها",
+            "درستش کن",
+            "اصلاحش کن",
+            "تعمیرش کن",
+            "پیسیشاپ",
+            "پیسی شاپ",
+            "pc shop",
+            "pcshop",
+            "کدنویسی",
+            "antigravity",
+            "آنتی گرویتی",
             # Browser & Web (Phase 7)
             "browse",
             "browser",
@@ -369,6 +406,28 @@ class AgentPlanner:
             "تیترها",
             "سرفصل‌ها",
             "پیوندها",
+            # Phase 9 Voice, Email & WhatsApp Communication Cues
+            "microphone",
+            "mic",
+            "میکروفون",
+            "میکروفن",
+            "قطع میکروفون",
+            "وصل میکروفون",
+            "email",
+            "mail",
+            "gmail",
+            "outlook",
+            "send email",
+            "ایمیل",
+            "نامه",
+            "میل",
+            "جیمیل",
+            "whatsapp",
+            "whats app",
+            "واتساپ",
+            "واتس‌اپ",
+            "واتس اپ",
+            "پیام واتساپ",
         ]
         if any(cue in cleaned for cue in action_cues):
             return True
@@ -480,7 +539,9 @@ class AgentPlanner:
             logger.warning(
                 f"Structured plan generation via model failed: {exc}. Falling back to default deterministic decomposition."
             )
-            data = self._build_fallback_plan_dict(goal, available_tools)
+            data = self._build_fallback_plan_dict(
+                goal, available_tools, session_id=context.session_id
+            )
 
         plan = self._build_and_validate_plan(data, goal, context)
 
@@ -1207,8 +1268,10 @@ class AgentPlanner:
 
         return None
 
-    def _detect_coding_agent_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
-        """Recognize Persian and English delegation prompts for the Antigravity coding agent."""
+    def _detect_coding_agent_intent(
+        self, goal: str, tool_names: set[str], session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Recognize Persian and English delegation prompts for the Antigravity coding agent and software engineering tasks."""
         norm = goal.lower().strip()
 
         # Check status or health
@@ -1229,29 +1292,71 @@ class AgentPlanner:
                 "dependencies": [],
             }
 
-        # Check verification
+        # Resolve active project workspace path if known
+        target_ws: str | None = None
+        try:
+            from core.conversation_session import get_conversation_session_manager
+
+            mgr = get_conversation_session_manager()
+            sess = mgr.get_session(session_id or "default_session")
+            if sess and sess.active_project_path:
+                target_ws = sess.active_project_path
+        except Exception:
+            pass
+
+        # Check project cues in goal
+        if not target_ws:
+            if any(k in norm for k in ("pc shop", "pcshop", "پیسی شاپ", "پیسیشاپ")):
+                target_ws = "C:\\AI\\pc-shop"
+            elif any(k in norm for k in ("doc proc", "document processing", "پردازش سند")):
+                target_ws = "C:\\AI\\doc-proc"
+
+        # 1. Project inspection / Verify task / Check repo / Run tests
         if "coding_agent_verify_task" in tool_names and any(
             k in norm
             for k in (
                 "تایید تغییرات کد",
                 "بررسی ریپو",
+                "بررسی پروژه",
+                "ریپو",
+                "تستهاشو",
+                "تست هاشو",
+                "تست‌هاشو",
+                "تستها",
+                "تست‌ها",
+                "تست ها",
+                "اجرای تست",
                 "verify code",
                 "verify workspace",
                 "check repo",
+                "check project",
+                "inspect project",
+                "run tests",
+                "run its tests",
+                "test suite",
+                "what did you change",
+                "چه تغییراتی",
+                "چه چیزی تغییر کرد",
             )
         ):
+            params: dict[str, Any] = {"run_tests": True, "run_linter": True}
+            if target_ws:
+                params["workspace_path"] = target_ws
             return {
-                "description": "Independently verify git status, diff, tests, and linter",
+                "description": f"Independently inspect project workspace and run tests ({target_ws or 'current project'})",
                 "step_type": "tool_call",
                 "tool_name": "coding_agent_verify_task",
-                "parameters": {"run_tests": True, "run_linter": True},
+                "parameters": params,
                 "dependencies": [],
             }
 
-        # Check delegation
+        # 2. Project error fixing / Delegation to Antigravity
         if "coding_agent_delegate_task" in tool_names and any(
             k in norm
             for k in (
+                "درستش کن",
+                "اصلاحش کن",
+                "تعمیرش کن",
                 "کد بنویس",
                 "برنامه نویسی",
                 "توسعه دهنده",
@@ -1259,15 +1364,24 @@ class AgentPlanner:
                 "delegate to antigravity",
                 "write code with agy",
                 "coding agent",
-                "fix bug with agy",
+                "fix bug",
+                "fix it",
+                "fix error",
+                "fix the failing tests",
+                "fix failing tests",
+                "خطایی داشت درستش کن",
+                "خطاها رو برطرف کن",
                 "implement feature",
             )
         ):
+            params = {"prompt": goal, "auto_verify": True}
+            if target_ws:
+                params["workspace_path"] = target_ws
             return {
                 "description": f"Delegate programming task to Google Antigravity: {goal}",
                 "step_type": "tool_call",
                 "tool_name": "coding_agent_delegate_task",
-                "parameters": {"prompt": goal, "auto_verify": True},
+                "parameters": params,
                 "dependencies": [],
             }
 
@@ -1276,10 +1390,196 @@ class AgentPlanner:
     def _detect_file_modification_intent(
         self, goal: str, tool_names: set[str]
     ) -> dict[str, Any] | None:
-        """Recognize document extraction, file write/edit, diff, duplicate and archive operations."""
+        """Recognize document extraction, file write/edit/copy/move/delete, diff, duplicate and archive operations."""
         norm = goal.lower().strip()
 
-        # Document extraction (.pdf, .docx, .xlsx, .pptx, etc.)
+        # 1. File Write / Create (e.g. "Create a simple HTML file on my Windows Desktop named test.html")
+        is_file_creation = any(
+            k in norm
+            for k in (
+                "create a file",
+                "create file",
+                "write a file",
+                "write file",
+                "write to file",
+                "make a file",
+                "save to file",
+                "save file",
+                "save to desktop",
+                "create on desktop",
+                "write on desktop",
+                "save on desktop",
+                "بساز",
+                "ایجاد فایل",
+                "بنویس در فایل",
+                "ساخت فایل",
+                "فایل جدید",
+                "html file",
+                "فایل html",
+            )
+        ) or (
+            any(k in norm for k in ("create", "make", "save", "write", "ایجاد", "بنویس", "بساز"))
+            and any(k in norm for k in ("file", "desktop", "فایل", "دسکتاپ", "میزکار"))
+        )
+
+        if "file_write_text" in tool_names and is_file_creation:
+            from infrastructure.paths import get_desktop_dir
+
+            desktop_dir = get_desktop_dir()
+
+            # Target directory detection
+            is_desktop = any(k in norm for k in ("desktop", "دسکتاپ", "میزکار"))
+            target_dir = desktop_dir if is_desktop else Path(".")
+
+            # Extract filename
+            target_filename = ""
+
+            # Check quotes first
+            for quote_mark in ('"', "'", "«", "»"):
+                if quote_mark in goal:
+                    parts = re.split(r'["\'«»]', goal)
+                    for part in parts:
+                        cleaned_part = part.strip()
+                        if "." in cleaned_part and not cleaned_part.startswith("http"):
+                            target_filename = cleaned_part
+                            break
+                    if target_filename:
+                        break
+
+            # Check named/called patterns
+            if not target_filename:
+                m_named = re.search(
+                    r'(?:named|called|به نام|با نام|اسم|نام)\s+["\'«»]?([a-zA-Z0-9_.-]+)["\'«»]?',
+                    goal,
+                    re.IGNORECASE,
+                )
+                if m_named:
+                    target_filename = m_named.group(1).rstrip(".,;:")
+
+            # Check standard extensions in goal
+            if not target_filename:
+                m_ext = re.search(
+                    r"\b([a-zA-Z0-9_.-]+\.(?:html?|txt|py|json|md|css|js|csv|xml|yaml|yml|log|bat|ps1|sh))\b",
+                    goal,
+                    re.IGNORECASE,
+                )
+                if m_ext:
+                    target_filename = m_ext.group(1)
+
+            # Fallback extension if missing or incomplete
+            if not target_filename:
+                if "html" in norm:
+                    target_filename = "test.html"
+                elif "python" in norm or "py" in norm:
+                    target_filename = "script.py"
+                elif "json" in norm:
+                    target_filename = "data.json"
+                else:
+                    target_filename = "file.txt"
+            elif "." not in target_filename:
+                if "html" in norm:
+                    target_filename += ".html"
+                elif "python" in norm:
+                    target_filename += ".py"
+                elif "json" in norm:
+                    target_filename += ".json"
+                else:
+                    target_filename += ".txt"
+
+            resolved_path = (target_dir / target_filename).resolve()
+
+            # Generate appropriate content
+            ext = resolved_path.suffix.lower()
+            content = ""
+
+            # Check for user-specified content
+            m_content = re.search(
+                r'(?:with content|content:|با محتوای|شامل|با متن)\s+["\'«»]?([\s\S]+?)["\'«»]?$',
+                goal,
+                re.IGNORECASE,
+            )
+            if m_content:
+                content = m_content.group(1).strip()
+            else:
+                if ext in (".html", ".htm"):
+                    content = (
+                        "<!DOCTYPE html>\n"
+                        '<html lang="en">\n'
+                        "<head>\n"
+                        '    <meta charset="UTF-8">\n'
+                        '    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+                        "    <title>JARVIS Generated Page</title>\n"
+                        "</head>\n"
+                        "<body>\n"
+                        "    <h1>Hello from JARVIS</h1>\n"
+                        "    <p>This file was automatically created and verified on your Windows Desktop.</p>\n"
+                        "</body>\n"
+                        "</html>\n"
+                    )
+                elif ext == ".py":
+                    content = '# Generated by JARVIS\nprint("Hello from JARVIS")\n'
+                elif ext == ".json":
+                    content = '{\n  "generator": "JARVIS",\n  "status": "success"\n}\n'
+                elif ext == ".md":
+                    content = (
+                        f"# {resolved_path.stem}\n\nGenerated by JARVIS on your Windows Desktop.\n"
+                    )
+                else:
+                    content = f"Hello from JARVIS.\nCreated file: {resolved_path.name}\n"
+
+            return {
+                "description": f"Create and verify file '{resolved_path.name}' at '{resolved_path}'",
+                "step_type": "tool_call",
+                "tool_name": "file_write_text",
+                "parameters": {
+                    "file_path": str(resolved_path),
+                    "content": content,
+                    "overwrite": True,
+                },
+                "dependencies": [],
+            }
+
+        # 2. File Delete (e.g. "حذف فایل test.html", "delete file test.txt")
+        if "file_delete" in tool_names and any(
+            k in norm for k in ("delete file", "remove file", "حذف فایل", "پاک کردن فایل")
+        ):
+            from infrastructure.paths import get_desktop_dir
+
+            target_file = ""
+            for quote_mark in ('"', "'", "«", "»"):
+                if quote_mark in goal:
+                    parts = re.split(r'["\'«»]', goal)
+                    for part in parts:
+                        cleaned_part = part.strip()
+                        if "." in cleaned_part:
+                            target_file = cleaned_part
+                            break
+                    if target_file:
+                        break
+            if not target_file:
+                m_ext = re.search(
+                    r"\b([a-zA-Z0-9_.-]+\.(?:html?|txt|py|json|md|css|js|csv|xml|yaml|yml|log))\b",
+                    goal,
+                    re.IGNORECASE,
+                )
+                if m_ext:
+                    target_file = m_ext.group(1)
+
+            is_desktop = any(k in norm for k in ("desktop", "دسکتاپ", "میزکار"))
+            if is_desktop and target_file and not Path(target_file).is_absolute():
+                resolved_del = (get_desktop_dir() / target_file).resolve()
+            else:
+                resolved_del = Path(target_file or "file.txt").resolve()
+
+            return {
+                "description": f"Safely delete file '{resolved_del.name}'",
+                "step_type": "tool_call",
+                "tool_name": "file_delete",
+                "parameters": {"file_path": str(resolved_del), "permanent": False},
+                "dependencies": [],
+            }
+
+        # 3. Document extraction (.pdf, .docx, .xlsx, .pptx, etc.)
         if "file_extract_document" in tool_names and any(
             k in norm
             for k in (
@@ -1295,11 +1595,15 @@ class AgentPlanner:
             )
         ):
             target_file = ""
-            for quote_mark in ('"', "'"):
+            for quote_mark in ('"', "'", "«", "»"):
                 if quote_mark in goal:
-                    parts = goal.split(quote_mark)
-                    if len(parts) >= 3:
-                        target_file = parts[1]
+                    parts = re.split(r'["\'«»]', goal)
+                    for part in parts:
+                        cleaned_part = part.strip()
+                        if "." in cleaned_part:
+                            target_file = cleaned_part
+                            break
+                    if target_file:
                         break
             return {
                 "description": f"Extract document text and structure from {target_file or 'target file'}",
@@ -1410,8 +1714,183 @@ class AgentPlanner:
 
         return None
 
+    def _detect_voice_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Detect microphone mute, voice status, and speech commands."""
+        norm = goal.lower().strip()
+        # Check unmute first so 'unmute' is not captured by 'mute'
+        if "voice_mute" in tool_names and any(
+            k in norm
+            for k in (
+                "میکروفون رو وصل",
+                "وصل میکروفون",
+                "وصل میکروفن",
+                "unmute mic",
+                "unmute microphone",
+            )
+        ):
+            return {
+                "description": "Unmute microphone listening",
+                "step_type": "tool_call",
+                "tool_name": "voice_mute",
+                "parameters": {"mute": False},
+                "dependencies": [],
+            }
+        if "voice_mute" in tool_names and any(
+            k in norm
+            for k in (
+                "میکروفون رو قطع",
+                "قطع میکروفون",
+                "قطع میکروفن",
+                "mute mic",
+                "mute microphone",
+            )
+        ):
+            return {
+                "description": "Mute microphone listening",
+                "step_type": "tool_call",
+                "tool_name": "voice_mute",
+                "parameters": {"mute": True},
+                "dependencies": [],
+            }
+        if "voice_status" in tool_names and any(
+            k in norm
+            for k in (
+                "وضعیت میکروفون",
+                "وضعیت ویس",
+                "وضعیت صدا و میکروفون",
+                "voice status",
+                "mic status",
+            )
+        ):
+            return {
+                "description": "Check voice subsystem and audio device status",
+                "step_type": "tool_call",
+                "tool_name": "voice_status",
+                "parameters": {},
+                "dependencies": [],
+            }
+        return None
+
+    def _detect_email_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Detect email composition and sending intents in Persian and English."""
+        norm = goal.strip()
+        norm_lower = norm.lower()
+        if "email_compose" not in tool_names and "email_send" not in tool_names:
+            return None
+
+        # Check for email cues
+        email_cues = ["ایمیل", "جیمیل", "میل", "email", "gmail", "send email", "send mail"]
+        if not any(cue in norm_lower for cue in email_cues):
+            return None
+
+        # Extract explicit email address or named recipient
+        email_match = re.search(r"[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+", norm)
+        recipient = email_match.group(0) if email_match else ""
+        if not recipient:
+            fa_rec = re.search(r"(?:برای|به)\s+([^\s,]+)\s+ایمیل", norm)
+            if fa_rec:
+                recipient = fa_rec.group(1)
+            else:
+                en_rec = re.search(
+                    r"email\s+(?:to\s+)?([a-zA-Z0-9_.-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|[a-zA-Z]+)",
+                    norm,
+                    re.IGNORECASE,
+                )
+                if en_rec and en_rec.group(1).lower() not in (
+                    "me",
+                    "him",
+                    "her",
+                    "them",
+                    "someone",
+                    "a",
+                    "an",
+                    "the",
+                ):
+                    recipient = en_rec.group(1)
+                else:
+                    logger.info("Ambiguous email recipient; requiring user clarification.")
+                    return None
+
+        body_text = norm
+        subject = "Message from JARVIS"
+        if "بگو" in norm:
+            parts = norm.split("بگو", 1)
+            body_text = parts[1].strip(" :،.")
+            subject = "گزارش / پیام"
+        elif "saying" in norm_lower:
+            parts = re.split(r"saying", norm, flags=re.IGNORECASE)
+            body_text = parts[1].strip(" :.,")
+            subject = "Message from JARVIS"
+
+        att_match = re.search(
+            r"['\"]?([a-zA-Z0-9_.-]+\.(?:pdf|docx|txt|py|png|jpg|zip))['\"]?", norm
+        )
+        attachment_paths = [att_match.group(1)] if att_match else []
+
+        target_tool = "email_compose" if "email_compose" in tool_names else "email_send"
+        return {
+            "description": f"Compose email draft to {recipient}",
+            "step_type": "tool_call",
+            "tool_name": target_tool,
+            "parameters": {
+                "to": [recipient],
+                "subject": subject,
+                "body_text": body_text,
+                "attachment_paths": attachment_paths if attachment_paths else None,
+            },
+            "dependencies": [],
+        }
+
+    def _detect_whatsapp_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Detect WhatsApp message intents in Persian and English."""
+        norm = goal.strip()
+        norm_lower = norm.lower()
+        if "whatsapp_compose" not in tool_names and "whatsapp_send" not in tool_names:
+            return None
+
+        wa_cues = ["واتساپ", "واتس‌اپ", "واتس اپ", "whatsapp", "whats app"]
+        if not any(cue in norm_lower for cue in wa_cues):
+            return None
+
+        # Check for explicit phone number first
+        phone_match = re.search(r"(\+?\d[\d\s\-\(\)]{7,15}\d)", norm)
+        if phone_match:
+            recipient = phone_match.group(1).replace(" ", "").replace("-", "")
+        elif re.search(r"\b(خودم|به خودم|myself|to myself|to me)\b", norm, re.IGNORECASE):
+            recipient = "خودم"
+        else:
+            logger.info(
+                "Ambiguous or unverified WhatsApp recipient (missing phone number); requiring user clarification."
+            )
+            return None
+
+        msg_text = norm
+        if "بگو" in norm:
+            msg_text = norm.split("بگو", 1)[1].strip(" :،.")
+        elif "که" in norm:
+            msg_text = norm.split("که", 1)[1].strip(" :،.")
+        elif "saying" in norm_lower:
+            msg_text = re.split(r"saying", norm, flags=re.IGNORECASE)[1].strip(" :.,")
+        elif "that" in norm_lower:
+            msg_text = re.split(r"that", norm, flags=re.IGNORECASE)[1].strip(" :.,")
+
+        target_tool = "whatsapp_compose" if "whatsapp_compose" in tool_names else "whatsapp_send"
+        return {
+            "description": f"Compose WhatsApp message for {recipient}",
+            "step_type": "tool_call",
+            "tool_name": target_tool,
+            "parameters": {
+                "recipient": recipient,
+                "message_text": msg_text,
+            },
+            "dependencies": [],
+        }
+
     def _build_fallback_plan_dict(
-        self, goal: str, available_tools: list[ToolDefinition] | None = None
+        self,
+        goal: str,
+        available_tools: list[ToolDefinition] | None = None,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Produce safe deterministic fallback plan when LLM structured generation fails."""
         steps: list[dict[str, Any]] = [
@@ -1425,26 +1904,36 @@ class AgentPlanner:
         ]
         tool_names = {t.name for t in (available_tools or [])}
 
-        # Priority 1: Check audio control intent
-        audio_step = self._detect_audio_intent(goal, tool_names)
-        if audio_step:
+        # Priority 0: Check microphone / voice intent
+        if voice_step := self._detect_voice_intent(goal, tool_names):
+            steps.append(voice_step)
+        # Priority 1: Check Email intent
+        elif email_step := self._detect_email_intent(goal, tool_names):
+            steps.append(email_step)
+        # Priority 2: Check WhatsApp intent
+        elif wa_step := self._detect_whatsapp_intent(goal, tool_names):
+            steps.append(wa_step)
+        # Priority 3: Check Windows audio control intent
+        elif audio_step := self._detect_audio_intent(goal, tool_names):
             steps.append(audio_step)
-        # Priority 2: Check coding agent intent
-        elif coding_step := self._detect_coding_agent_intent(goal, tool_names):
+        # Priority 4: Check coding agent intent
+        elif coding_step := self._detect_coding_agent_intent(
+            goal, tool_names, session_id=session_id
+        ):
             steps.append(coding_step)
-        # Priority 3: Check terminal intent
+        # Priority 5: Check terminal intent
         elif term_step := self._detect_terminal_intent(goal, tool_names):
             steps.append(term_step)
-        # Priority 4: Check file modification & document extraction intent
+        # Priority 6: Check file modification & document extraction intent
         elif file_step := self._detect_file_modification_intent(goal, tool_names):
             steps.append(file_step)
-        # Priority 5: Check browser agent intent
+        # Priority 7: Check browser agent intent
         elif browser_step := self._detect_browser_intent(goal, tool_names):
             steps.append(browser_step)
-        # Priority 6: Check system diagnostic intent
+        # Priority 8: Check system diagnostic intent
         elif sys_step := self._detect_system_intent(goal, tool_names):
             steps.append(sys_step)
-        # Priority 7: Check desktop control intent
+        # Priority 9: Check desktop control intent
         elif desk_step := self._detect_desktop_intent(goal, tool_names):
             steps.append(desk_step)
         # Priority 4: Match mock search if query mentions search/find
@@ -1542,6 +2031,53 @@ class AgentPlanner:
             params = s_data.get("parameters") or {}
             if not isinstance(params, dict):
                 params = {}
+
+            # Parameter normalization for file tools
+            if tool_name == "file_write_text":
+                if "file_path" not in params:
+                    if "path" in params:
+                        params["file_path"] = params.pop("path")
+                    elif "target_path" in params:
+                        params["file_path"] = params.pop("target_path")
+
+                from infrastructure.paths import get_desktop_dir
+
+                desktop_dir = get_desktop_dir()
+                raw_fp = str(params.get("file_path", ""))
+                is_desktop = (
+                    "desktop" in raw_fp.lower()
+                    or "دسکتاپ" in raw_fp.lower()
+                    or any(k in goal.lower() for k in ("desktop", "دسکتاپ", "میزکار"))
+                )
+                if is_desktop:
+                    fn = Path(raw_fp).name if raw_fp else "test.html"
+                    params["file_path"] = str((desktop_dir / fn).resolve())
+
+                if "overwrite" not in params:
+                    params["overwrite"] = True
+
+                if not params.get("content"):
+                    for text_alias in ("text", "data", "body"):
+                        if text_alias in params and params[text_alias]:
+                            params["content"] = params.pop(text_alias)
+                            break
+                    if not params.get("content"):
+                        if "html" in str(params.get("file_path", "")).lower():
+                            params["content"] = (
+                                "<!DOCTYPE html>\n"
+                                '<html lang="en">\n'
+                                "<head>\n"
+                                '    <meta charset="UTF-8">\n'
+                                "    <title>JARVIS Generated Page</title>\n"
+                                "</head>\n"
+                                "<body>\n"
+                                "    <h1>Hello from JARVIS</h1>\n"
+                                "    <p>This file was automatically created and verified on your Windows Desktop.</p>\n"
+                                "</body>\n"
+                                "</html>\n"
+                            )
+                        else:
+                            params["content"] = "Hello from JARVIS.\n"
 
             step = PlanStep(
                 step_id=new_id,

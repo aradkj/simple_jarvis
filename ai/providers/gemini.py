@@ -1,5 +1,6 @@
 """Google Gemini AI Provider implementation using the official google-genai SDK."""
 
+import re
 import time
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -10,6 +11,7 @@ from google.genai import errors, types
 from ai.base import (
     AIProviderError,
     AIResponse,
+    AudioTranscriptionResult,
     AuthenticationError,
     BaseAIProvider,
     ConnectionErrorType,
@@ -306,13 +308,16 @@ class GeminiProvider(BaseAIProvider):
         )
         return contents
 
-    def _build_config(self) -> types.GenerateContentConfig:
+    def _build_config(self, **kwargs: Any) -> types.GenerateContentConfig:
         """Create GenerateContentConfig with model parameters, system instruction, and timeout."""
         timeout_ms = max(10000, int(self.settings.gemini_request_timeout * 1000))
+        sys_inst = kwargs.get("system_instruction") or DEFAULT_SYSTEM_INSTRUCTION
         return types.GenerateContentConfig(
-            system_instruction=DEFAULT_SYSTEM_INSTRUCTION,
-            temperature=self.settings.gemini_temperature,
-            max_output_tokens=self.settings.gemini_max_output_tokens,
+            system_instruction=sys_inst,
+            temperature=float(kwargs.get("temperature", self.settings.gemini_temperature)),
+            max_output_tokens=int(
+                kwargs.get("max_output_tokens", self.settings.gemini_max_output_tokens)
+            ),
             http_options=types.HttpOptions(timeout=timeout_ms),
         )
 
@@ -375,7 +380,7 @@ class GeminiProvider(BaseAIProvider):
 
         client = self._get_client()
         contents = self._build_contents(prompt, history)
-        config = self._build_config()
+        config = self._build_config(**kwargs)
 
         # Bounded retry for transient failures
         max_retries = 2
@@ -435,7 +440,7 @@ class GeminiProvider(BaseAIProvider):
 
         client = self._get_client()
         contents = self._build_contents(prompt, history)
-        config = self._build_config()
+        config = self._build_config(**kwargs)
 
         def _abort_connection() -> None:
             try:
@@ -488,6 +493,84 @@ class GeminiProvider(BaseAIProvider):
             **kwargs,
         ):
             yield token
+
+    def transcribe_audio(
+        self,
+        audio_data: bytes,
+        mime_type: str = "audio/wav",
+        language: str = "auto",
+        prompt: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        **kwargs: Any,
+    ) -> AudioTranscriptionResult:
+        """Transcribe audio using Google Gemini multimodal capabilities."""
+        if cancellation_token and cancellation_token.is_cancelled():
+            return AudioTranscriptionResult(text="", confidence=0.0)
+
+        if not audio_data or len(audio_data) < 320:
+            return AudioTranscriptionResult(text="", confidence=0.0)
+
+        client = self._get_client()
+
+        lang_instruction = (
+            f"The audio is expected to be in {language}."
+            if language in ("fa", "en")
+            else "Detect whether the audio is in Persian (fa-IR) or English (en-US)."
+        )
+
+        default_prompt = (
+            f"You are a high-accuracy Speech-to-Text (STT) engine for JARVIS. {lang_instruction} "
+            "Transcribe the spoken audio verbatim in its native script. "
+            "Preserve technical terminology (e.g., Python, Windows, CPU, WhatsApp, Email), "
+            "digits, dates, names, and phone numbers accurately. "
+            "If the audio contains only silence, noise, or clicks, return empty text. "
+            "Output ONLY a valid JSON object with these keys: "
+            '{"text": "transcription string", "language": "fa" or "en", "confidence": float between 0.0 and 1.0, "is_ambiguous": boolean}'
+        )
+
+        instruction = prompt or default_prompt
+        part = types.Part.from_bytes(data=audio_data, mime_type=mime_type)
+        prompt_part = types.Part.from_text(text=instruction)
+
+        target_model = kwargs.get("model") or self.default_model
+
+        try:
+            if cancellation_token and cancellation_token.is_cancelled():
+                return AudioTranscriptionResult(text="", confidence=0.0)
+
+            response = client.models.generate_content(
+                model=target_model,
+                contents=[types.Content(role="user", parts=[part, prompt_part])],
+            )
+            raw_resp = response.text.strip() if response and response.text else ""
+            cleaned_json = re.sub(
+                r"^```(?:json)?\s*|\s*```$", "", raw_resp, flags=re.MULTILINE
+            ).strip()
+
+            import json
+
+            parsed = json.loads(cleaned_json)
+            return AudioTranscriptionResult(
+                text=str(parsed.get("text", "")).strip(),
+                language=str(parsed.get("language", language if language != "auto" else "en")),
+                confidence=float(parsed.get("confidence", 0.95)),
+                is_ambiguous=bool(parsed.get("is_ambiguous", False)),
+                raw_response=parsed,
+            )
+        except json.JSONDecodeError:
+            return AudioTranscriptionResult(
+                text=raw_resp,
+                language=language if language != "auto" else "en",
+                confidence=0.85,
+                is_ambiguous=False,
+                raw_response={"raw": raw_resp},
+            )
+        except Exception as exc:
+            if cancellation_token and cancellation_token.is_cancelled():
+                return AudioTranscriptionResult(text="", confidence=0.0)
+            typed_err = self._map_exception(exc)
+            logger.error(f"Gemini audio transcription error: {typed_err}")
+            raise typed_err from exc
 
     def close(self) -> None:
         """Release client references."""

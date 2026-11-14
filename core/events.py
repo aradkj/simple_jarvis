@@ -28,6 +28,7 @@ class AgentEventType(StrEnum):
     AGENT_CANCELLED = "agent.cancelled"
     TASK_CREATED = "task.created"
     TASK_STARTED = "task.started"
+    TASK_PROGRESS = "task.progress"
     TASK_COMPLETED = "task.completed"
     TASK_FAILED = "task.failed"
     TASK_CANCELLED = "task.cancelled"
@@ -39,6 +40,20 @@ class AgentEventType(StrEnum):
     MESSAGE_RECEIVED = "message.received"
     MESSAGE_SENT = "message.sent"
     ERROR_OCCURRED = "error.occurred"
+
+    # Phase 9 Voice Intelligence & Unified Communication Events
+    VOICE_LISTENING_STARTED = "voice.listening_started"
+    VOICE_LISTENING_STOPPED = "voice.listening_stopped"
+    VOICE_WAKE_WORD_DETECTED = "voice.wake_word_detected"
+    VOICE_SPEECH_STARTED = "voice.speech_started"
+    VOICE_SPEECH_FINISHED = "voice.speech_finished"
+    VOICE_TRANSCRIPT_READY = "voice.transcript_ready"
+    VOICE_TTS_STARTED = "voice.tts_started"
+    VOICE_TTS_STOPPED = "voice.tts_stopped"
+    EMAIL_COMPOSED = "email.composed"
+    EMAIL_SENT = "email.sent"
+    WHATSAPP_COMPOSED = "whatsapp.composed"
+    WHATSAPP_SENT = "whatsapp.sent"
 
 
 @dataclass
@@ -79,6 +94,10 @@ class EventBus:
         """Subscribe a callback to all published events."""
         if callback not in self._global_subscribers:
             self._global_subscribers.append(callback)
+
+    def has_subscribers(self, event_type: AgentEventType) -> bool:
+        """Check whether an event type has registered subscribers."""
+        return bool(self._subscribers.get(event_type)) or bool(self._global_subscribers)
 
     def unsubscribe(self, event_type: AgentEventType, callback: EventCallback) -> None:
         """Unsubscribe a callback from a specific event type."""

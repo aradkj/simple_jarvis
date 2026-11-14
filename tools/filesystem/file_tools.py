@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from config import get_settings
 from core.permissions import PermissionCategory
@@ -87,7 +87,7 @@ class DirectoryListTool(BaseTool):
         max_entries = min(getattr(params, "max_entries", 100), settings.file_max_directory_entries)
 
         try:
-            resolved_dir = security.validate_and_resolve_path(req_path)
+            resolved_dir = security.validate_and_resolve_path(req_path, operation="read")
             if not resolved_dir.is_dir():
                 return ToolResult.failed(f"Path is not a directory: '{req_path}'")
 
@@ -181,7 +181,7 @@ class FileMetadataTool(BaseTool):
         req_path = getattr(params, "file_path", "")
 
         try:
-            target_path = security.validate_and_resolve_path(req_path)
+            target_path = security.validate_and_resolve_path(req_path, operation="read")
             if not target_path.exists():
                 return ToolResult.failed(f"File not found: '{req_path}'")
 
@@ -362,7 +362,7 @@ class FileSearchTextTool(BaseTool):
         max_depth = min(getattr(params, "max_depth", 2), settings.file_max_search_depth)
 
         try:
-            resolved_root = security.validate_and_resolve_path(req_dir)
+            resolved_root = security.validate_and_resolve_path(req_dir, operation="read")
             if not resolved_root.is_dir():
                 return ToolResult.failed(f"Search target is not a directory: '{req_dir}'")
 
@@ -506,12 +506,53 @@ class FileDocumentExtractInput(BaseModel):
 
 
 class FileWriteTextInput(BaseModel):
-    file_path: str = Field(description="Target file path to write")
-    content: str = Field(description="Text content to write")
+    file_path: str = Field(default="", description="Target file path to write")
+    content: str = Field(default="", description="Text content to write")
     overwrite: bool = Field(
         default=False, description="Whether to overwrite if file already exists"
     )
     encoding: str = Field(default="utf-8", description="File character encoding (default: utf-8)")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            # Check for conflicting path parameters
+            path_values: dict[str, str] = {}
+            for alias in ("file_path", "path", "target_path", "filepath"):
+                val = data.get(alias)
+                if val is not None and str(val).strip():
+                    path_values[alias] = str(val).strip()
+
+            if len(path_values) > 1:
+                normalized_unique = {os.path.normpath(v) for v in path_values.values()}
+                if len(normalized_unique) > 1:
+                    raise ValueError(
+                        f"Ambiguous conflicting path parameters provided: {path_values}. "
+                        "Specify a single consistent target path."
+                    )
+                data["file_path"] = next(iter(path_values.values()))
+            elif len(path_values) == 1:
+                data["file_path"] = next(iter(path_values.values()))
+
+            # Check for conflicting content parameters
+            content_values: dict[str, str] = {}
+            for alias in ("content", "text", "data", "body"):
+                val = data.get(alias)
+                if val is not None and str(val):
+                    content_values[alias] = str(val)
+
+            if len(content_values) > 1:
+                if len(set(content_values.values())) > 1:
+                    raise ValueError(
+                        f"Ambiguous conflicting content parameters provided: {list(content_values.keys())}. "
+                        "Specify a single content payload."
+                    )
+                data["content"] = next(iter(content_values.values()))
+            elif len(content_values) == 1:
+                data["content"] = next(iter(content_values.values()))
+
+        return data
 
 
 class FileEditTextInput(BaseModel):
@@ -607,7 +648,7 @@ class FileDocumentExtractTool(BaseTool):
         max_pages = getattr(params, "max_pages", 50)
 
         try:
-            resolved_path = security.validate_and_resolve_path(req_path)
+            resolved_path = security.validate_and_resolve_path(req_path, operation="read")
             extractor = get_document_extractor()
             doc = extractor.extract(resolved_path, max_chars=max_chars, max_pages=max_pages)
 

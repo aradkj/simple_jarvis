@@ -32,6 +32,8 @@ env/
 .env.local
 *.key
 *.pem
+*.enc
+scratch/
 
 # Database & Persistent Data
 data/*.db

@@ -32,13 +32,17 @@ class GeminiStreamWorker(QThread):
         prompt: str,
         session_id: str,
         history: list[ConversationMessage] | None = None,
+        system_instruction: str | None = None,
         parent: QObject | None = None,
+        **kwargs: Any,
     ) -> None:
         super().__init__(parent)
         self.provider = provider
         self.prompt = prompt
         self.session_id = session_id
         self.history = history or []
+        self.system_instruction = system_instruction
+        self.kwargs = kwargs
         self.cancellation_token = CancellationToken()
         self._accumulated_text = ""
 
@@ -51,10 +55,15 @@ class GeminiStreamWorker(QThread):
         """Thread execution logic."""
         logger.debug(f"Starting AI streaming worker for session {self.session_id}")
         try:
+            stream_kwargs = dict(self.kwargs)
+            if self.system_instruction:
+                stream_kwargs["system_instruction"] = self.system_instruction
+
             for chunk in self.provider.stream_text(
                 prompt=self.prompt,
                 history=self.history,
                 cancellation_token=self.cancellation_token,
+                **stream_kwargs,
             ):
                 if self.cancellation_token.is_cancelled():
                     self.generation_cancelled.emit(self.session_id)

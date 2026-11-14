@@ -91,8 +91,8 @@ class FileOperationResult:
 class FileService:
     """Core service for controlled file system operations."""
 
-    def __init__(self) -> None:
-        self.security = get_path_security_service()
+    def __init__(self, security_service: Any = None) -> None:
+        self.security = security_service or get_path_security_service()
 
     def _is_reserved_windows_name(self, filename: str) -> bool:
         stem = Path(filename).stem.upper()
@@ -116,7 +116,7 @@ class FileService:
             )
 
         # Validate containment in authorized directory
-        resolved_path = self.security.validate_and_resolve_path(target_path)
+        resolved_path = self.security.validate_and_resolve_path(target_path, operation="write")
 
         if self._is_reserved_windows_name(resolved_path.name):
             return FileOperationResult(
@@ -157,14 +157,41 @@ class FileService:
 
             # Atomic replacement
             os.replace(temp_file_path, str(resolved_path))
-            size_written = len(content.encode(encoding))
-            logger.info(f"File written atomically: '{resolved_path}' ({size_written} bytes)")
+
+            # Post-write disk verification
+            if not resolved_path.exists():
+                return FileOperationResult(
+                    success=False,
+                    operation="write_text",
+                    target_path=str(resolved_path),
+                    message=f"Verification failed: File '{resolved_path}' does not exist after write.",
+                )
+
+            actual_size = resolved_path.stat().st_size
+            expected_size = len(content.encode(encoding))
+            if expected_size > 0 and actual_size == 0:
+                return FileOperationResult(
+                    success=False,
+                    operation="write_text",
+                    target_path=str(resolved_path),
+                    message=f"Verification failed: File '{resolved_path}' was written with 0 bytes (expected {expected_size} bytes).",
+                )
+
+            size_written = actual_size
+            logger.info(
+                f"File written atomically and verified on disk: '{resolved_path}' ({size_written} bytes)"
+            )
             return FileOperationResult(
                 success=True,
                 operation="write_text",
                 target_path=str(resolved_path),
-                message=f"File successfully written ({size_written} bytes).",
-                details={"bytes_written": size_written, "chars_written": len(content)},
+                message=f"File successfully created and verified on disk: '{resolved_path}' ({size_written} bytes).",
+                details={
+                    "bytes_written": size_written,
+                    "chars_written": len(content),
+                    "file_path": str(resolved_path),
+                    "verified": True,
+                },
             )
         except Exception as exc:
             if os.path.exists(temp_file_path):
@@ -195,7 +222,7 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        resolved_path = self.security.validate_and_resolve_path(target_path)
+        resolved_path = self.security.validate_and_resolve_path(target_path, operation="edit")
         if not resolved_path.exists() or not resolved_path.is_file():
             return FileOperationResult(
                 success=False,
@@ -278,8 +305,8 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        src = self.security.validate_and_resolve_path(source_path)
-        dst = self.security.validate_and_resolve_path(dest_path)
+        src = self.security.validate_and_resolve_path(source_path, operation="read")
+        dst = self.security.validate_and_resolve_path(dest_path, operation="write")
 
         if not src.exists() or not src.is_file():
             return FileOperationResult(
@@ -341,8 +368,8 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        src = self.security.validate_and_resolve_path(source_path)
-        dst = self.security.validate_and_resolve_path(dest_path)
+        src = self.security.validate_and_resolve_path(source_path, operation="delete")
+        dst = self.security.validate_and_resolve_path(dest_path, operation="write")
 
         if not src.exists():
             return FileOperationResult(
@@ -408,7 +435,7 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        resolved_path = self.security.validate_and_resolve_path(target_path)
+        resolved_path = self.security.validate_and_resolve_path(target_path, operation="delete")
         if not resolved_path.exists():
             return FileOperationResult(
                 success=False,
@@ -490,8 +517,8 @@ class FileService:
         max_diff_lines: int = 500,
     ) -> FileOperationResult:
         """Compute unified diff between two authorized text files."""
-        src_a = self.security.validate_and_resolve_path(file_path_a)
-        src_b = self.security.validate_and_resolve_path(file_path_b)
+        src_a = self.security.validate_and_resolve_path(file_path_a, operation="read")
+        src_b = self.security.validate_and_resolve_path(file_path_b, operation="read")
 
         if not src_a.exists() or not src_a.is_file():
             return FileOperationResult(
@@ -556,7 +583,7 @@ class FileService:
         max_files: int = 500,
     ) -> FileOperationResult:
         """Identify duplicate files in an authorized directory via size clustering and SHA-256 hashes."""
-        resolved_dir = self.security.validate_and_resolve_path(directory_path)
+        resolved_dir = self.security.validate_and_resolve_path(directory_path, operation="read")
         if not resolved_dir.is_dir():
             return FileOperationResult(
                 success=False,
@@ -634,7 +661,7 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        resolved_archive = self.security.validate_and_resolve_path(archive_path)
+        resolved_archive = self.security.validate_and_resolve_path(archive_path, operation="write")
         if resolved_archive.suffix.lower() != ".zip":
             return FileOperationResult(
                 success=False,
@@ -645,7 +672,7 @@ class FileService:
 
         resolved_sources: list[Path] = []
         for src in source_paths:
-            p = self.security.validate_and_resolve_path(src)
+            p = self.security.validate_and_resolve_path(src, operation="read")
             if not p.exists():
                 return FileOperationResult(
                     success=False,
@@ -704,7 +731,7 @@ class FileService:
         archive_path: str,
     ) -> FileOperationResult:
         """Inspect ZIP archive metadata, entries, and compression ratio without extraction."""
-        resolved_archive = self.security.validate_and_resolve_path(archive_path)
+        resolved_archive = self.security.validate_and_resolve_path(archive_path, operation="read")
         if not resolved_archive.exists() or not resolved_archive.is_file():
             return FileOperationResult(
                 success=False,
@@ -768,8 +795,10 @@ class FileService:
                 message="File modification subsystem is disabled in configuration.",
             )
 
-        resolved_archive = self.security.validate_and_resolve_path(archive_path)
-        resolved_target_dir = self.security.validate_and_resolve_path(target_directory)
+        resolved_archive = self.security.validate_and_resolve_path(archive_path, operation="read")
+        resolved_target_dir = self.security.validate_and_resolve_path(
+            target_directory, operation="write"
+        )
 
         if not resolved_archive.exists() or not resolved_archive.is_file():
             return FileOperationResult(

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import dataclass
 
 from core.events import AgentEvent, AgentEventType, EventBus
 from core.execution_context import CancellationToken
@@ -16,6 +17,150 @@ from core.tool_proposal import ProposalStatus, ToolProposal
 from infrastructure.logging import get_logger
 
 logger = get_logger("approval")
+
+
+@dataclass
+class ApprovedRecord:
+    proposal_id: str
+    tool_name: str
+    account_id: str
+    recipient: str
+    payload_hash: str
+    approved_at: float
+    consumed: bool = False
+    consumed_at: float | None = None
+    session_id: str = ""
+
+
+class TrustedApprovalStore:
+    """Independent, trusted storage for cryptographic approval digests.
+
+    Guarantees:
+    - Binds exact account, operation, recipient, message content, attachments.
+    - Prevents payload replacement and hash replacement attacks.
+    - Invalidates approval if any payload content or attachment bytes are modified.
+    - Prevents replay of already-consumed approvals.
+    - Independently verifies email and WhatsApp dispatch paths.
+    """
+
+    _instance: TrustedApprovalStore | None = None
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._records: dict[str, ApprovedRecord] = {}
+        self._hash_to_proposal: dict[str, str] = {}
+
+    @classmethod
+    def get_instance(cls) -> TrustedApprovalStore:
+        if cls._instance is None:
+            cls._instance = TrustedApprovalStore()
+        return cls._instance
+
+    def register_approval(
+        self,
+        proposal_id: str,
+        tool_name: str,
+        account_id: str,
+        recipient: str,
+        payload_hash: str,
+        session_id: str = "",
+    ) -> ApprovedRecord:
+        """Store approved payload digest in trusted independent storage."""
+        with self._lock:
+            record = ApprovedRecord(
+                proposal_id=proposal_id,
+                tool_name=tool_name,
+                account_id=account_id.strip().lower(),
+                recipient=recipient.strip(),
+                payload_hash=payload_hash.strip().lower(),
+                approved_at=time.time(),
+                consumed=False,
+                session_id=session_id,
+            )
+            self._records[proposal_id] = record
+            self._hash_to_proposal[record.payload_hash] = proposal_id
+            logger.info(
+                f"TrustedApprovalStore registered approval for {tool_name} "
+                f"(proposal={proposal_id}, account={account_id}, hash={payload_hash[:12]}...)"
+            )
+            return record
+
+    def has_approval(self, payload_hash: str) -> bool:
+        """Check whether an approval record exists for the given hash."""
+        with self._lock:
+            return payload_hash.strip().lower() in self._hash_to_proposal
+
+    def verify_and_consume(
+        self,
+        tool_name: str,
+        account_id: str,
+        recipient: str,
+        actual_payload_hash: str,
+        proposal_id: str | None = None,
+    ) -> tuple[bool, str]:
+        """Verify the payload against an independently recorded approval and mark it consumed."""
+        with self._lock:
+            record: ApprovedRecord | None = None
+            if proposal_id and proposal_id in self._records:
+                record = self._records[proposal_id]
+            elif actual_payload_hash.strip().lower() in self._hash_to_proposal:
+                pid = self._hash_to_proposal[actual_payload_hash.strip().lower()]
+                record = self._records.get(pid)
+
+            if not record:
+                return (
+                    False,
+                    "No trusted approval record found for this operation. Explicit approval required.",
+                )
+
+            # 1. Replay check
+            if record.consumed:
+                return (
+                    False,
+                    f"Approval for proposal '{record.proposal_id}' has already been consumed (replay blocked).",
+                )
+
+            # 2. Tool name verification
+            if record.tool_name != tool_name:
+                return (
+                    False,
+                    f"Tool mismatch: approval is for '{record.tool_name}', attempted '{tool_name}'.",
+                )
+
+            # 3. Account ID binding check (prevents account substitution)
+            if record.account_id and account_id and record.account_id != account_id.strip().lower():
+                return (
+                    False,
+                    f"Account substitution detected: approval was granted for '{record.account_id}', but attempted '{account_id}'.",
+                )
+
+            # 4. Recipient binding check (prevents recipient substitution)
+            if record.recipient and recipient and record.recipient != recipient.strip():
+                return (
+                    False,
+                    f"Recipient substitution detected: approval was granted for '{record.recipient}', but attempted '{recipient}'.",
+                )
+
+            # 5. Payload hash tampering check (invalidates approval if content or attachments changed)
+            if record.payload_hash != actual_payload_hash.strip().lower():
+                return (
+                    False,
+                    "Payload tampering detected: payload contents or attachments were modified after approval.",
+                )
+
+            # Mark approval consumed immediately before dispatch
+            record.consumed = True
+            record.consumed_at = time.time()
+            logger.info(
+                f"TrustedApprovalStore consumed approval for {tool_name} (proposal={record.proposal_id})"
+            )
+            return True, ""
+
+    def clear(self) -> None:
+        """Clear all stored approval records."""
+        with self._lock:
+            self._records.clear()
+            self._hash_to_proposal.clear()
 
 
 class ApprovalManager:
@@ -180,6 +325,7 @@ class ApprovalManager:
         approved: bool,
         session_id: str,
         reason: str = "",
+        source: str = "ui",
     ) -> bool:
         """Submit a user approval or rejection decision.
 
@@ -187,6 +333,7 @@ class ApprovalManager:
         - Proposal must be currently pending.
         - Session ID must match the proposal's session ID.
         - Replay, duplicate, or stale decisions are rejected.
+        - Voice recognition alone cannot approve high-risk outbound communication (email_send / whatsapp_send).
 
         Returns:
             True if the decision was successfully delivered, False otherwise.
@@ -204,6 +351,21 @@ class ApprovalManager:
                     f"'{proposal.session_id}', not '{session_id}'."
                 )
                 return False
+
+            # Voice approval safety check: Voice recognition alone cannot approve external dispatches
+            if approved and source.lower() == "voice":
+                from core.permissions import PermissionCategory
+
+                cat = getattr(proposal, "category", None)
+                if cat in (
+                    PermissionCategory.EMAIL_SEND,
+                    PermissionCategory.WHATSAPP_SEND,
+                ) or proposal.tool_name in ("email_send", "whatsapp_send"):
+                    logger.warning(
+                        f"Voice approval rejected for proposal '{proposal_id}' ({proposal.tool_name}): "
+                        "External sends require explicit manual UI approval for safety."
+                    )
+                    return False
 
             # Status check: only pending proposals may be decided
             if proposal.status != ProposalStatus.PENDING_APPROVAL:

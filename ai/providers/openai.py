@@ -12,6 +12,7 @@ from openai import OpenAI
 
 from ai.base import (
     AIResponse,
+    AudioTranscriptionResult,
     AuthenticationError,
     BaseAIProvider,
     ConnectionErrorType,
@@ -851,3 +852,47 @@ class OpenAIProvider(BaseAIProvider):
                 "model": model,
                 "messages": continuation_messages,
             }
+
+    def transcribe_audio(
+        self,
+        audio_data: bytes,
+        mime_type: str = "audio/wav",
+        language: str = "auto",
+        prompt: str | None = None,
+        cancellation_token: CancellationToken | None = None,
+        **kwargs: Any,
+    ) -> AudioTranscriptionResult:
+        """Transcribe audio using OpenAI Whisper API."""
+        if cancellation_token and cancellation_token.is_cancelled():
+            return AudioTranscriptionResult(text="", confidence=0.0)
+
+        if not audio_data or len(audio_data) < 320:
+            return AudioTranscriptionResult(text="", confidence=0.0)
+
+        client = self._get_client()
+        import io
+
+        file_tuple = ("audio.wav", io.BytesIO(audio_data), mime_type)
+        call_kwargs: dict[str, Any] = {
+            "model": "whisper-1",
+            "file": file_tuple,
+        }
+        if language in ("fa", "en"):
+            call_kwargs["language"] = language
+        if prompt:
+            call_kwargs["prompt"] = prompt
+
+        try:
+            transcript = client.audio.transcriptions.create(**call_kwargs)
+            text = getattr(transcript, "text", "").strip()
+            return AudioTranscriptionResult(
+                text=text,
+                language=language if language != "auto" else "en",
+                confidence=0.95,
+                is_ambiguous=False,
+                raw_response={"text": text},
+            )
+        except Exception as exc:
+            mapped = self._map_exception(exc)
+            logger.error(f"OpenAI audio transcription failed: {mapped}")
+            raise mapped from exc

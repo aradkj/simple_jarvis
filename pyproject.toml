@@ -65,4 +65,9 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --strict-markers"
 qt_api = "pyside6"
+markers = [
+    "integration: marks tests as integration tests",
+    "slow: marks tests as slow running",
+]
+
 

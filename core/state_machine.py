@@ -113,12 +113,14 @@ class AgentStateMachine:
         },
         AgentState.EXECUTING: {
             AgentState.EXECUTING,  # Step-to-step self-transition
+            AgentState.ANALYZING,  # Transition to analyze new goal or prompt
             AgentState.WAITING_FOR_APPROVAL,
             AgentState.WAITING_FOR_INPUT,
             AgentState.REPLANNING,
             AgentState.COMPLETED,
             AgentState.FAILED,
             AgentState.CANCELLED,
+            AgentState.IDLE,
         },
         AgentState.REPLANNING: {
             AgentState.PLAN_READY,

@@ -114,11 +114,33 @@ class AntigravityProcessManager:
 
         cmd = [str(exe_path), "-p", prompt, "--output-format", "stream-json"]
 
-        # Configure session-only allowed tools for headless delegation without modifying global settings
+        # Least-privilege approved command patterns (NO wildcard command(*))
+        approved_commands = [
+            "command(git *)",
+            "command(pytest *)",
+            "command(pytest)",
+            "command(python -m pytest *)",
+            "command(python -m unittest *)",
+            "command(ruff check *)",
+            "command(ruff format *)",
+            "command(npm test *)",
+            "command(npm test)",
+            "command(npm run build *)",
+            "command(cargo test *)",
+            "command(cargo test)",
+            "command(go test *)",
+            "command(go test ./...)",
+        ]
+        allowed_permissions = approved_commands + ["read(*)", "edit(*)"]
+
+        # Configure session-only allowed tools scoped strictly to this workspace
         session_settings = json.dumps(
-            {"permissions": {"allow": ["command(*)", "edit(*)", "read(*)"]}}
+            {
+                "trustedWorkspaces": [str(workspace.resolve())],
+                "permissions": {"allow": allowed_permissions},
+            }
         )
-        cmd.extend(["--settings", session_settings])
+        cmd.extend(["--settings", session_settings, "--sandbox"])
 
         eff_model = model or settings.antigravity_default_model
         if eff_model:
