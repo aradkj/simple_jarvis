@@ -33,6 +33,13 @@ class PermissionCategory(StrEnum):
     WINDOWS_POWER_CONTROL = "windows_power_control"
     WINDOWS_OPERATION = "windows_operation"
 
+    # Phase 7 Browser Agent
+    BROWSER_NAVIGATE = "browser_navigate"
+    BROWSER_READ = "browser_read"
+    BROWSER_INTERACT = "browser_interact"
+    BROWSER_TAB = "browser_tab"
+    BROWSER_SCREENSHOT = "browser_screenshot"
+
 
 class PermissionDecision(StrEnum):
     """Possible outcomes of a permission evaluation."""

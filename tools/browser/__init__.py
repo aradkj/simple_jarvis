@@ -1,0 +1,62 @@
+"""JARVIS Phase 7 Browser Agent: Secure web browsing, navigation, and interaction tools."""
+
+from tools.browser.browser_service import BrowserService
+from tools.browser.browser_tools import (
+    BrowserClickElementTool,
+    BrowserFillFieldTool,
+    BrowserGetHeadingsTool,
+    BrowserGetLinksTool,
+    BrowserGetPageContentTool,
+    BrowserGoBackTool,
+    BrowserGoForwardTool,
+    BrowserNavigateTool,
+    BrowserReloadTool,
+    BrowserScreenshotTool,
+    BrowserScrollTool,
+    BrowserSearchTool,
+    BrowserTabCloseTool,
+    BrowserTabListTool,
+    BrowserTabNewTool,
+    BrowserTabSwitchTool,
+)
+from tools.browser.exceptions import (
+    BrowserCrashError,
+    BrowserError,
+    BrowserNavigationError,
+    BrowserNotInitializedError,
+    BrowserSecurityError,
+    BrowserTabLimitError,
+    BrowserTimeoutError,
+    URLValidationError,
+)
+from tools.browser.url_security import URLSecurityValidator, ValidationResult
+
+__all__ = [
+    "BrowserClickElementTool",
+    "BrowserCrashError",
+    "BrowserError",
+    "BrowserFillFieldTool",
+    "BrowserGetHeadingsTool",
+    "BrowserGetLinksTool",
+    "BrowserGetPageContentTool",
+    "BrowserGoBackTool",
+    "BrowserGoForwardTool",
+    "BrowserNavigateTool",
+    "BrowserNavigationError",
+    "BrowserNotInitializedError",
+    "BrowserReloadTool",
+    "BrowserScreenshotTool",
+    "BrowserScrollTool",
+    "BrowserSearchTool",
+    "BrowserSecurityError",
+    "BrowserService",
+    "BrowserTabCloseTool",
+    "BrowserTabLimitError",
+    "BrowserTabListTool",
+    "BrowserTabNewTool",
+    "BrowserTabSwitchTool",
+    "BrowserTimeoutError",
+    "URLSecurityValidator",
+    "URLValidationError",
+    "ValidationResult",
+]

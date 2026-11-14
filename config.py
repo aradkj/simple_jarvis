@@ -353,6 +353,48 @@ class Settings(BaseSettings):
         description="Configured allowlist of safe application identifiers that may be resolved and launched",
     )
 
+    # Phase 7 Browser Agent
+    browser_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 7 Browser Agent subsystem for web navigation and interaction",
+    )
+    browser_headless: bool = Field(
+        default=True,
+        description="Run browser in headless mode (no visible window)",
+    )
+    browser_navigation_timeout: int = Field(
+        default=30,
+        ge=5,
+        le=120,
+        description="Maximum seconds to wait for page navigation to complete",
+    )
+    browser_max_tabs: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum number of browser tabs allowed simultaneously",
+    )
+    browser_max_navigation_steps: int = Field(
+        default=20,
+        ge=1,
+        le=50,
+        description="Maximum cumulative navigation steps allowed per session",
+    )
+    browser_max_extracted_chars: int = Field(
+        default=16000,
+        ge=1000,
+        le=100000,
+        description="Maximum characters returned from DOM text extraction",
+    )
+    browser_downloads_enabled: bool = Field(
+        default=False,
+        description="Whether file downloads are allowed (disabled by default for safety)",
+    )
+    browser_allow_localhost: bool = Field(
+        default=False,
+        description="Allow navigation to localhost/loopback addresses (only True in testing)",
+    )
+
     # Storage and Log Directories
     data_dir: Path = Field(default_factory=get_data_dir, description="Persistent data storage path")
     logs_dir: Path = Field(default_factory=get_logs_dir, description="Log files destination path")

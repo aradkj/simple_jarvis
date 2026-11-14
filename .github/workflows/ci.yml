@@ -57,6 +57,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install Playwright Chromium
+        run: |
+          playwright install chromium
+
       - name: Initialize Environment File
         run: |
           if (!(Test-Path .env)) { Copy-Item .env.example .env }

@@ -332,6 +332,43 @@ class AgentPlanner:
             "شبکه",
             "فایل",
             "پوشه",
+            # Browser & Web (Phase 7)
+            "browse",
+            "browser",
+            "website",
+            "webpage",
+            "web page",
+            "url",
+            "http",
+            "https",
+            "search the web",
+            "search internet",
+            "tab",
+            "tabs",
+            "screenshot",
+            "scroll",
+            "refresh",
+            "reload",
+            "headings",
+            "links",
+            "مرورگر",
+            "سایت",
+            "وبسایت",
+            "صفحه وب",
+            "آدرس",
+            "جستجو در اینترنت",
+            "جستجو در وب",
+            "سرچ در اینترنت",
+            "اسکرینشات",
+            "اسکرین شات",
+            "اسکرول",
+            "تب",
+            "زبانه",
+            "رفرش",
+            "بارگذاری مجدد",
+            "تیترها",
+            "سرفصل‌ها",
+            "پیوندها",
         ]
         if any(cue in cleaned for cue in action_cues):
             return True
@@ -821,6 +858,355 @@ class AgentPlanner:
             }
         return None
 
+    def _detect_browser_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Detect browser actions (Navigate, Search, Read, Links, Headings, Screenshot, Tabs, Scroll)."""
+        norm = self._normalize_persian_digits(goal.strip().lower())
+
+        # 1. Search the web
+        if "browser_search" in tool_names and any(
+            cue in norm
+            for cue in (
+                "search the web for",
+                "search the web",
+                "search internet for",
+                "search internet",
+                "در اینترنت جستجو کن",
+                "در اینترنت درباره",
+                "در اینترنت سرچ کن",
+                "در وب جستجو کن",
+                "در وب سرچ کن",
+                "جستجو در اینترنت",
+                "جستجو در وب",
+            )
+        ):
+            clean_query = goal
+            for prefix in (
+                "search the web for",
+                "search the web",
+                "search internet for",
+                "search internet",
+                "در اینترنت درباره",
+                "در اینترنت جستجو کن",
+                "در اینترنت سرچ کن",
+                "در وب جستجو کن",
+                "در وب سرچ کن",
+                "جستجو در اینترنت",
+                "جستجو در وب",
+            ):
+                if prefix in norm:
+                    idx = norm.find(prefix) + len(prefix)
+                    clean_query = goal[idx:].strip(" :.-،")
+                    for suffix in ("رو جستجو کن", "رو سرچ کن", "جستجو کن", "سرچ کن", "بگرد"):
+                        if clean_query.endswith(suffix):
+                            clean_query = clean_query[: -len(suffix)].strip()
+                    break
+            if not clean_query:
+                clean_query = goal
+            return {
+                "description": f"Search the web for '{clean_query}'",
+                "step_type": "tool_call",
+                "tool_name": "browser_search",
+                "parameters": {"query": clean_query, "num_results": 5},
+                "dependencies": [],
+            }
+
+        # 2. Screenshot
+        if "browser_screenshot" in tool_names and any(
+            cue in norm
+            for cue in (
+                "screenshot",
+                "اسکرینشات",
+                "اسکرین شات",
+                "عکس از صفحه",
+                "عکس صفحه",
+                "تصویر صفحه",
+                "capture page",
+            )
+        ):
+            return {
+                "description": "Capture screenshot of the current web page",
+                "step_type": "tool_call",
+                "tool_name": "browser_screenshot",
+                "parameters": {"full_page": False},
+                "dependencies": [],
+            }
+
+        # 3. Headings
+        if "browser_get_headings" in tool_names and any(
+            cue in norm
+            for cue in (
+                "headings",
+                "تیترها",
+                "تیترهای صفحه",
+                "عنوان و تیترهای صفحه",
+                "سرفصل‌ها",
+                "سرفصلهای صفحه",
+                "show page headings",
+                "page headings",
+            )
+        ):
+            return {
+                "description": "Extract heading structure and outline from the web page",
+                "step_type": "tool_call",
+                "tool_name": "browser_get_headings",
+                "parameters": {"max_depth": 3},
+                "dependencies": [],
+            }
+
+        # 4. Links
+        if "browser_get_links" in tool_names and any(
+            cue in norm
+            for cue in (
+                "links",
+                "لینک‌ها",
+                "لینکها",
+                "پیوندها",
+                "پیوندهای صفحه",
+                "لینک‌های این صفحه",
+                "لینکهای این صفحه",
+                "extract all relevant links",
+                "extract links",
+            )
+        ):
+            return {
+                "description": "Extract links from the web page",
+                "step_type": "tool_call",
+                "tool_name": "browser_get_links",
+                "parameters": {"max_links": 50},
+                "dependencies": [],
+            }
+
+        # 5. Page Content / Summarize
+        if "browser_get_page_content" in tool_names and any(
+            cue in norm
+            for cue in (
+                "محتوای این صفحه",
+                "محتوای صفحه",
+                "متن این صفحه",
+                "متن صفحه",
+                "خلاصه کن این صفحه",
+                "صفحه رو خلاصه کن",
+                "اطلاعات این جدول",
+                "اطلاعات جدول",
+                "summarize this page",
+                "summarize page",
+                "extract page text",
+                "page content",
+                "read page",
+                "extract the table",
+            )
+        ):
+            return {
+                "description": "Extract visible text content from the current web page",
+                "step_type": "tool_call",
+                "tool_name": "browser_get_page_content",
+                "parameters": {"max_chars": 16000},
+                "dependencies": [],
+            }
+
+        # 6. Tab Management
+        if "browser_tab_new" in tool_names and any(
+            cue in norm
+            for cue in ("تب جدید", "زبانه جدید", "new tab", "open a new tab", "open new tab")
+        ):
+            return {
+                "description": "Open a new browser tab",
+                "step_type": "tool_call",
+                "tool_name": "browser_tab_new",
+                "parameters": {},
+                "dependencies": [],
+            }
+
+        if "browser_tab_close" in tool_names and any(
+            cue in norm
+            for cue in (
+                "ببند تب",
+                "تب رو ببند",
+                "تب را ببند",
+                "این تب رو ببند",
+                "تب فعلی رو ببند",
+                "close tab",
+                "close the tab",
+                "close this tab",
+                "close current tab",
+            )
+        ):
+            return {
+                "description": "Close the active browser tab",
+                "step_type": "tool_call",
+                "tool_name": "browser_tab_close",
+                "parameters": {},
+                "dependencies": [],
+            }
+
+        if "browser_tab_list" in tool_names and any(
+            cue in norm
+            for cue in (
+                "لیست تب‌ها",
+                "لیست تبها",
+                "تب‌های باز",
+                "تبهای باز",
+                "list tabs",
+                "show tabs",
+                "open tabs",
+            )
+        ):
+            return {
+                "description": "List all open browser tabs",
+                "step_type": "tool_call",
+                "tool_name": "browser_tab_list",
+                "parameters": {},
+                "dependencies": [],
+            }
+
+        if "browser_tab_switch" in tool_names and any(
+            cue in norm
+            for cue in (
+                "تب قبلی",
+                "تب بعدی",
+                "سوییچ کن به تب",
+                "برو به تب",
+                "switch to tab",
+                "switch tab",
+            )
+        ):
+            target_idx = 0
+            if "قبلی" in norm or "previous" in norm:
+                target_idx = 0
+            elif "بعدی" in norm or "next" in norm:
+                target_idx = 1
+            else:
+                m = re.search(r"\d+", norm)
+                if m:
+                    target_idx = int(m.group(0))
+            return {
+                "description": f"Switch to browser tab {target_idx}",
+                "step_type": "tool_call",
+                "tool_name": "browser_tab_switch",
+                "parameters": {"tab_index": target_idx},
+                "dependencies": [],
+            }
+
+        # 7. Navigation History (Back, Forward, Reload)
+        if "browser_go_back" in tool_names and any(
+            cue in norm
+            for cue in (
+                "به تب قبلی برگرد",
+                "به صفحه قبلی برگرد",
+                "صفحه قبل",
+                "برگرد عقب",
+                "برو عقب",
+                "go back",
+                "back to previous",
+            )
+        ):
+            return {
+                "description": "Navigate back in browser history",
+                "step_type": "tool_call",
+                "tool_name": "browser_go_back",
+                "parameters": {"steps": 1},
+                "dependencies": [],
+            }
+
+        if "browser_go_forward" in tool_names and any(
+            cue in norm for cue in ("صفحه بعد", "برو جلو", "go forward")
+        ):
+            return {
+                "description": "Navigate forward in browser history",
+                "step_type": "tool_call",
+                "tool_name": "browser_go_forward",
+                "parameters": {"steps": 1},
+                "dependencies": [],
+            }
+
+        if "browser_reload" in tool_names and any(
+            cue in norm
+            for cue in (
+                "رفرش کن",
+                "بارگذاری مجدد",
+                "دوباره لود کن",
+                "reload",
+                "refresh the page",
+                "refresh page",
+            )
+        ):
+            return {
+                "description": "Reload the current web page",
+                "step_type": "tool_call",
+                "tool_name": "browser_reload",
+                "parameters": {"ignore_cache": False},
+                "dependencies": [],
+            }
+
+        # 8. Scroll
+        if "browser_scroll" in tool_names and any(
+            cue in norm for cue in ("scroll", "اسکرول", "برو پایین", "برو بالا", "پایین صفحه")
+        ):
+            direction = "down"
+            if "بالا" in norm or "up" in norm or "top" in norm:
+                direction = "up"
+            return {
+                "description": f"Scroll page {direction}",
+                "step_type": "tool_call",
+                "tool_name": "browser_scroll",
+                "parameters": {"direction": direction, "amount": 500},
+                "dependencies": [],
+            }
+
+        # 9. Navigate to URL / Website
+        if "browser_navigate" in tool_names and any(
+            cue in norm
+            for cue in (
+                "باز کن",
+                "بازکن",
+                "برو به",
+                "سایت",
+                "وبسایت",
+                "صفحه",
+                "open",
+                "navigate to",
+                "go to",
+                "http://",
+                "https://",
+                "://",
+                "www.",
+                ".com",
+                ".org",
+                ".io",
+                ".ir",
+                ".net",
+            )
+        ):
+            target_url = ""
+            url_match = re.search(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+", goal)
+            if url_match:
+                target_url = url_match.group(0).rstrip(".,;")
+            else:
+                domain_match = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)", goal)
+                if domain_match:
+                    target_url = f"https://{domain_match.group(1).rstrip('.,;')}"
+                elif any(k in norm for k in ("گوگل", "google")):
+                    target_url = "https://www.google.com"
+                elif any(k in norm for k in ("گیت‌هاب", "گیت هاب", "github")):
+                    target_url = "https://github.com"
+                elif any(k in norm for k in ("ویکی‌پدیا", "wikipedia")):
+                    target_url = "https://en.wikipedia.org"
+                elif any(k in norm for k in ("fastapi",)):
+                    target_url = "https://fastapi.tiangolo.com"
+                elif any(k in norm for k in ("python",)):
+                    target_url = "https://www.python.org"
+
+            if target_url:
+                return {
+                    "description": f"Navigate browser to '{target_url}'",
+                    "step_type": "tool_call",
+                    "tool_name": "browser_navigate",
+                    "parameters": {"url": target_url},
+                    "dependencies": [],
+                }
+
+        return None
+
     def _build_fallback_plan_dict(
         self, goal: str, available_tools: list[ToolDefinition] | None = None
     ) -> dict[str, Any]:
@@ -840,10 +1226,13 @@ class AgentPlanner:
         audio_step = self._detect_audio_intent(goal, tool_names)
         if audio_step:
             steps.append(audio_step)
-        # Priority 2: Check system diagnostic intent
+        # Priority 2: Check browser agent intent
+        elif browser_step := self._detect_browser_intent(goal, tool_names):
+            steps.append(browser_step)
+        # Priority 3: Check system diagnostic intent
         elif sys_step := self._detect_system_intent(goal, tool_names):
             steps.append(sys_step)
-        # Priority 3: Check desktop control intent
+        # Priority 4: Check desktop control intent
         elif desk_step := self._detect_desktop_intent(goal, tool_names):
             steps.append(desk_step)
         # Priority 4: Match mock search if query mentions search/find

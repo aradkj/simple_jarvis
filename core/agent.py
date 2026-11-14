@@ -116,6 +116,18 @@ class JARVISAgent:
             if getattr(self.settings, "windows_power_control_enabled", True):
                 allowed_categories.add(PermissionCategory.WINDOWS_POWER_CONTROL)
 
+            # Phase 7 Browser Agent Permissions
+            if getattr(self.settings, "browser_enabled", True):
+                allowed_categories.update(
+                    {
+                        PermissionCategory.BROWSER_NAVIGATE,
+                        PermissionCategory.BROWSER_READ,
+                        PermissionCategory.BROWSER_TAB,
+                        PermissionCategory.BROWSER_SCREENSHOT,
+                        PermissionCategory.BROWSER_INTERACT,
+                    }
+                )
+
         self.permission_manager = permission_manager or StrictDefaultDenyPermissionManager(
             allowed_categories=allowed_categories
         )
@@ -253,6 +265,54 @@ class JARVISAgent:
                 )
 
             default_tools.extend(windows_tools)
+
+        # 5. Phase 7 Real Browser Agent Tools
+        self.browser_service: Any = None
+        if getattr(self.settings, "browser_enabled", True):
+            try:
+                from tools.browser.browser_service import BrowserService
+                from tools.browser.browser_tools import (
+                    BrowserClickElementTool,
+                    BrowserFillFieldTool,
+                    BrowserGetHeadingsTool,
+                    BrowserGetLinksTool,
+                    BrowserGetPageContentTool,
+                    BrowserGoBackTool,
+                    BrowserGoForwardTool,
+                    BrowserNavigateTool,
+                    BrowserReloadTool,
+                    BrowserScreenshotTool,
+                    BrowserScrollTool,
+                    BrowserSearchTool,
+                    BrowserTabCloseTool,
+                    BrowserTabListTool,
+                    BrowserTabNewTool,
+                    BrowserTabSwitchTool,
+                )
+
+                self.browser_service = BrowserService(settings=self.settings)
+                browser_tools: list[BaseTool] = [
+                    BrowserNavigateTool(self.browser_service),
+                    BrowserSearchTool(self.browser_service),
+                    BrowserGetPageContentTool(self.browser_service),
+                    BrowserGetHeadingsTool(self.browser_service),
+                    BrowserGetLinksTool(self.browser_service),
+                    BrowserClickElementTool(self.browser_service),
+                    BrowserScrollTool(self.browser_service),
+                    BrowserFillFieldTool(self.browser_service),
+                    BrowserScreenshotTool(self.browser_service),
+                    BrowserTabNewTool(self.browser_service),
+                    BrowserTabListTool(self.browser_service),
+                    BrowserTabSwitchTool(self.browser_service),
+                    BrowserTabCloseTool(self.browser_service),
+                    BrowserGoBackTool(self.browser_service),
+                    BrowserGoForwardTool(self.browser_service),
+                    BrowserReloadTool(self.browser_service),
+                ]
+                default_tools.extend(browser_tools)
+                logger.info("Registered 16 Phase 7 Browser Agent tools.")
+            except Exception as b_exc:
+                logger.warning(f"Failed to initialize Browser Agent tools: {b_exc}")
 
         for tool in default_tools:
             with contextlib.suppress(Exception):
@@ -660,6 +720,11 @@ class JARVISAgent:
             pass
 
         self._current_context.cancel()
+        if hasattr(self, "browser_service") and self.browser_service:
+            try:
+                self.browser_service.close()
+            except Exception as exc:
+                logger.warning(f"Error closing browser service: {exc}")
         try:
             self.memory_manager.close()
         except Exception as exc:
