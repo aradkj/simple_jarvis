@@ -40,6 +40,14 @@ class PermissionCategory(StrEnum):
     BROWSER_TAB = "browser_tab"
     BROWSER_SCREENSHOT = "browser_screenshot"
 
+    # Phase 8 File System, Terminal & Antigravity Coding Agent
+    FILE_WRITE = "file_write"
+    FILE_DELETE = "file_delete"
+    FILE_ARCHIVE = "file_archive"
+    TERMINAL_EXECUTE = "terminal_execute"
+    CODING_AGENT_DELEGATE = "coding_agent_delegate"
+    CODING_AGENT_VERIFY = "coding_agent_verify"
+
 
 class PermissionDecision(StrEnum):
     """Possible outcomes of a permission evaluation."""

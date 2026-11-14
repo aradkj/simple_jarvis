@@ -44,6 +44,7 @@ from infrastructure.logging import get_logger
 from memory.base import MessageStatus
 from tools.filesystem.path_security import get_path_security_service
 from ui.chat_panel import ChatPanel
+from ui.coding_agent_dialog import CodingAgentDialog
 from ui.memory_dialog import MemoryManagementDialog
 from ui.status_panel import StatusPanel
 from ui.styles import DARK_THEME_QSS
@@ -897,6 +898,10 @@ class MainWindow(QMainWindow):
         self.memory_btn.clicked.connect(self._open_memory_dialog)
         header_layout.addWidget(self.memory_btn)
 
+        self.coding_agent_btn = QPushButton("💻 Coding Agent")
+        self.coding_agent_btn.clicked.connect(self._open_coding_agent_dialog)
+        header_layout.addWidget(self.coding_agent_btn)
+
         self.settings_btn = QPushButton("⚙ Settings")
         self.settings_btn.clicked.connect(self._open_settings_dialog)
         header_layout.addWidget(self.settings_btn)
@@ -1380,6 +1385,11 @@ class MainWindow(QMainWindow):
             memory_manager=self.agent.memory_manager,
             parent=self,
         )
+        dialog.exec()
+
+    def _open_coding_agent_dialog(self) -> None:
+        """Open the Phase 8 Antigravity Coding Agent Dialog."""
+        dialog = CodingAgentDialog(parent=self)
         dialog.exec()
 
     def closeEvent(self, event: QCloseEvent) -> None:

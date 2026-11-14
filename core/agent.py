@@ -28,11 +28,28 @@ from memory.database import SQLiteMemoryStore
 from memory.manager import MemoryManager
 from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
 from tools.base import BaseTool
+from tools.coding_agent import (
+    CodingAgentDelegateTaskTool,
+    CodingAgentGetTaskStatusTool,
+    CodingAgentStatusTool,
+    CodingAgentVerifyTaskTool,
+)
 from tools.filesystem import (
     DirectoryListTool,
+    FileArchiveCreateTool,
+    FileArchiveExtractTool,
+    FileArchiveInspectTool,
+    FileCompareDiffTool,
+    FileCopyTool,
+    FileDeleteTool,
+    FileDocumentExtractTool,
+    FileEditTextTool,
+    FileFindDuplicatesTool,
     FileMetadataTool,
+    FileMoveTool,
     FileReadTextTool,
     FileSearchTextTool,
+    FileWriteTextTool,
     get_path_security_service,
 )
 from tools.mock_tools import (
@@ -47,6 +64,10 @@ from tools.system import (
     SystemMemoryInfoTool,
     SystemNetworkInfoTool,
     SystemOverviewTool,
+)
+from tools.terminal import (
+    TerminalExecuteCommandTool,
+    TerminalListCommandsTool,
 )
 from tools.windows import (
     WindowsAppCloseTool,
@@ -127,6 +148,29 @@ class JARVISAgent:
                         PermissionCategory.BROWSER_INTERACT,
                     }
                 )
+
+        # Phase 8 File System Modification & Archive Permissions
+        if getattr(self.settings, "file_modification_enabled", True):
+            allowed_categories.update(
+                {
+                    PermissionCategory.FILE_WRITE,
+                    PermissionCategory.FILE_DELETE,
+                    PermissionCategory.FILE_ARCHIVE,
+                }
+            )
+
+        # Phase 8 Restricted Terminal Execution Permissions
+        if getattr(self.settings, "terminal_enabled", True):
+            allowed_categories.add(PermissionCategory.TERMINAL_EXECUTE)
+
+        # Phase 8 Antigravity Coding Agent Permissions
+        if getattr(self.settings, "antigravity_enabled", True):
+            allowed_categories.update(
+                {
+                    PermissionCategory.CODING_AGENT_DELEGATE,
+                    PermissionCategory.CODING_AGENT_VERIFY,
+                }
+            )
 
         self.permission_manager = permission_manager or StrictDefaultDenyPermissionManager(
             allowed_categories=allowed_categories
@@ -313,6 +357,46 @@ class JARVISAgent:
                 logger.info("Registered 16 Phase 7 Browser Agent tools.")
             except Exception as b_exc:
                 logger.warning(f"Failed to initialize Browser Agent tools: {b_exc}")
+
+        # 6. Phase 8 File System Modification & Document Extraction Tools
+        if self.settings.file_reading_enabled:
+            default_tools.append(FileDocumentExtractTool())
+            default_tools.append(FileCompareDiffTool())
+            default_tools.append(FileFindDuplicatesTool())
+
+        if getattr(self.settings, "file_modification_enabled", True):
+            default_tools.extend(
+                [
+                    FileWriteTextTool(),
+                    FileEditTextTool(),
+                    FileCopyTool(),
+                    FileMoveTool(),
+                    FileDeleteTool(),
+                    FileArchiveCreateTool(),
+                    FileArchiveInspectTool(),
+                    FileArchiveExtractTool(),
+                ]
+            )
+
+        # 7. Phase 8 Restricted Terminal Agent Tools
+        if getattr(self.settings, "terminal_enabled", True):
+            default_tools.extend(
+                [
+                    TerminalExecuteCommandTool(),
+                    TerminalListCommandsTool(),
+                ]
+            )
+
+        # 8. Phase 8 Antigravity Coding Agent Tools
+        if getattr(self.settings, "antigravity_enabled", True):
+            default_tools.extend(
+                [
+                    CodingAgentStatusTool(),
+                    CodingAgentDelegateTaskTool(),
+                    CodingAgentGetTaskStatusTool(),
+                    CodingAgentVerifyTaskTool(),
+                ]
+            )
 
         for tool in default_tools:
             with contextlib.suppress(Exception):

@@ -252,3 +252,56 @@ class MemoryOperationWorker(QThread):
         except Exception as exc:
             logger.error(f"MemoryOperationWorker failed: {exc}")
             self.operation_finished.emit(False, str(exc))
+
+
+class CodingAgentWorker(QThread):
+    """Background worker executing Antigravity task delegation without freezing the GUI."""
+
+    chunk_received = Signal(str)
+    task_completed = Signal(dict)
+    task_failed = Signal(str)
+
+    def __init__(
+        self,
+        prompt: str,
+        workspace_path: str | None = None,
+        model: str | None = None,
+        auto_verify: bool = True,
+        parent: QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.prompt = prompt
+        self.workspace_path = workspace_path
+        self.model = model
+        self.auto_verify = auto_verify
+        self.cancellation_token = CancellationToken()
+
+    def cancel(self) -> None:
+        self.cancellation_token.cancel()
+
+    def run(self) -> None:
+        from core.execution_context import ExecutionContext
+        from tools.coding_agent import get_coding_task_manager
+
+        manager = get_coding_task_manager()
+        ctx = ExecutionContext()
+
+        def _stream_cb(chunk: str) -> None:
+            self.chunk_received.emit(chunk)
+
+        try:
+            task = manager.delegate_task(
+                prompt=self.prompt,
+                workspace_path=self.workspace_path,
+                model=self.model,
+                auto_verify=self.auto_verify,
+                stream_callback=_stream_cb,
+                context=ctx,
+            )
+            if task.status.value == "failed":
+                self.task_failed.emit(task.error_message or "Task failed")
+            else:
+                self.task_completed.emit(task.to_dict())
+        except Exception as exc:
+            logger.error(f"CodingAgentWorker error: {exc}")
+            self.task_failed.emit(str(exc))

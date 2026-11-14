@@ -23,6 +23,8 @@ from config import get_settings
 from core.permissions import PermissionCategory
 from core.tool_proposal import RiskLevel, ToolDefinition
 from tools.base import BaseTool, ToolResult
+from tools.filesystem.document_extractor import get_document_extractor
+from tools.filesystem.file_service import get_file_service
 from tools.filesystem.path_security import get_path_security_service, is_reparse_point
 
 if TYPE_CHECKING:
@@ -480,4 +482,618 @@ class FileSearchTextTool(BaseTool):
             },
             requires_approval=False,
             timeout_seconds=15.0,
+        )
+
+
+# ============================================================================
+# Phase 8 Tools: Document Extraction, File Modification & Archive Operations
+# ============================================================================
+
+
+class FileDocumentExtractInput(BaseModel):
+    file_path: str = Field(
+        description="Target document path (.pdf, .docx, .xlsx, .pptx, .csv, .json, .txt, .md)"
+    )
+    max_chars: int = Field(
+        default=32000, ge=100, le=100000, description="Maximum characters to extract"
+    )
+    max_pages: int = Field(
+        default=50,
+        ge=1,
+        le=200,
+        description="Maximum pages/slides to parse for multi-page documents",
+    )
+
+
+class FileWriteTextInput(BaseModel):
+    file_path: str = Field(description="Target file path to write")
+    content: str = Field(description="Text content to write")
+    overwrite: bool = Field(
+        default=False, description="Whether to overwrite if file already exists"
+    )
+    encoding: str = Field(default="utf-8", description="File character encoding (default: utf-8)")
+
+
+class FileEditTextInput(BaseModel):
+    file_path: str = Field(description="Target file path to edit")
+    target_string: str | None = Field(
+        default=None, description="Exact substring to find and replace"
+    )
+    replacement_string: str | None = Field(
+        default=None, description="Replacement text for target_string"
+    )
+    append_content: str | None = Field(
+        default=None, description="Content to append at the end of the file"
+    )
+
+
+class FileCopyInput(BaseModel):
+    source_path: str = Field(description="Source file path to copy from")
+    dest_path: str = Field(description="Destination file path to copy to")
+    overwrite: bool = Field(
+        default=False, description="Whether to overwrite destination if it exists"
+    )
+
+
+class FileMoveInput(BaseModel):
+    source_path: str = Field(description="Source file path to move")
+    dest_path: str = Field(description="Destination file path")
+    overwrite: bool = Field(
+        default=False, description="Whether to overwrite destination if it exists"
+    )
+
+
+class FileDeleteInput(BaseModel):
+    file_path: str = Field(description="Path of file or directory to delete")
+    permanent: bool = Field(
+        default=False,
+        description="Whether to permanently delete instead of using Windows Recycle Bin",
+    )
+
+
+class FileCompareDiffInput(BaseModel):
+    file_path_a: str = Field(description="First file path")
+    file_path_b: str = Field(description="Second file path")
+    max_diff_lines: int = Field(
+        default=500, ge=10, le=2000, description="Maximum diff lines to return"
+    )
+
+
+class FileFindDuplicatesInput(BaseModel):
+    directory_path: str = Field(description="Authorized root directory to scan for duplicates")
+    min_size_bytes: int = Field(
+        default=1, ge=0, description="Minimum file size in bytes to inspect"
+    )
+    max_files: int = Field(default=500, ge=2, le=2000, description="Maximum files to scan")
+
+
+class FileArchiveCreateInput(BaseModel):
+    archive_path: str = Field(description="Path for the resulting .zip archive file")
+    source_paths: list[str] = Field(
+        description="List of files and/or directories to include in archive"
+    )
+
+
+class FileArchiveInspectInput(BaseModel):
+    archive_path: str = Field(description="Path to .zip archive to inspect")
+
+
+class FileArchiveExtractInput(BaseModel):
+    archive_path: str = Field(description="Path to .zip archive to extract")
+    target_directory: str = Field(
+        description="Authorized target directory where contents will be extracted"
+    )
+
+
+class FileDocumentExtractTool(BaseTool):
+    """Tool to extract text and structured metadata from documents (PDF, DOCX, XLSX, PPTX, CSV, TXT, etc.)."""
+
+    name = "file_extract_document"
+    description = "Extract text and structured metadata from PDF, Word (.docx), Excel (.xlsx), PowerPoint (.pptx), CSV, JSON, and text documents."
+    category = PermissionCategory.FILE_READ
+    input_schema = FileDocumentExtractInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Document extraction cancelled by user")
+
+        settings = get_settings()
+        if not settings.file_reading_enabled:
+            return ToolResult.denied("File reading subsystem is disabled in configuration.")
+
+        security = get_path_security_service()
+        req_path = getattr(params, "file_path", "")
+        max_chars = getattr(params, "max_chars", 32000)
+        max_pages = getattr(params, "max_pages", 50)
+
+        try:
+            resolved_path = security.validate_and_resolve_path(req_path)
+            extractor = get_document_extractor()
+            doc = extractor.extract(resolved_path, max_chars=max_chars, max_pages=max_pages)
+
+            content = doc.text_content
+            if settings.secret_redaction_enabled:
+                content = security.redact_secrets(content)
+
+            return ToolResult.success(
+                data={
+                    "file_path": str(resolved_path),
+                    "file_type": doc.file_type,
+                    "text_content": content,
+                    "char_count": len(content),
+                    "word_count": len(content.split()),
+                    "line_count": len(content.splitlines()),
+                    "page_count": doc.page_count,
+                    "sheet_count": doc.sheet_count,
+                    "truncated": doc.truncated,
+                    "metadata": doc.metadata,
+                }
+            )
+        except PermissionError as perm_err:
+            return ToolResult.denied(str(perm_err))
+        except Exception as exc:
+            return ToolResult.failed(f"Failed to extract document: {exc}")
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Target document path"},
+                    "max_chars": {"type": "integer", "default": 32000},
+                    "max_pages": {"type": "integer", "default": 50},
+                },
+                "required": ["file_path"],
+            },
+            requires_approval=False,
+            timeout_seconds=20.0,
+        )
+
+
+class FileWriteTextTool(BaseTool):
+    """Tool to write text content to a file inside an authorized directory."""
+
+    name = "file_write_text"
+    description = "Write or overwrite text content to a file inside an authorized directory with atomic safety."
+    category = PermissionCategory.FILE_WRITE
+    input_schema = FileWriteTextInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("File write cancelled by user")
+
+        target_path = getattr(params, "file_path", "")
+        content = getattr(params, "content", "")
+        overwrite = getattr(params, "overwrite", False)
+        encoding = getattr(params, "encoding", "utf-8")
+
+        service = get_file_service()
+        res = service.write_text(target_path, content, overwrite=overwrite, encoding=encoding)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.MEDIUM,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Target file path"},
+                    "content": {"type": "string", "description": "Text content to write"},
+                    "overwrite": {"type": "boolean", "default": False},
+                    "encoding": {"type": "string", "default": "utf-8"},
+                },
+                "required": ["file_path", "content"],
+            },
+            requires_approval=True,
+            timeout_seconds=15.0,
+        )
+
+
+class FileEditTextTool(BaseTool):
+    """Tool to modify an existing text file by replacing exact strings or appending content."""
+
+    name = "file_edit_text"
+    description = "Edit an existing text file by replacing an exact string match or appending content, producing a diff."
+    category = PermissionCategory.FILE_WRITE
+    input_schema = FileEditTextInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("File edit cancelled by user")
+
+        target_path = getattr(params, "file_path", "")
+        target_str = getattr(params, "target_string", None)
+        replacement_str = getattr(params, "replacement_string", None)
+        append_content = getattr(params, "append_content", None)
+
+        service = get_file_service()
+        res = service.edit_text(
+            target_path=target_path,
+            target_string=target_str,
+            replacement_string=replacement_str,
+            append_content=append_content,
+        )
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.MEDIUM,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Target file path"},
+                    "target_string": {
+                        "type": "string",
+                        "description": "Exact text to find and replace",
+                    },
+                    "replacement_string": {"type": "string", "description": "Replacement text"},
+                    "append_content": {"type": "string", "description": "Text to append to file"},
+                },
+                "required": ["file_path"],
+            },
+            requires_approval=True,
+            timeout_seconds=15.0,
+        )
+
+
+class FileCopyTool(BaseTool):
+    """Tool to copy a file between authorized locations."""
+
+    name = "file_copy"
+    description = "Copy a file from one authorized path to another."
+    category = PermissionCategory.FILE_WRITE
+    input_schema = FileCopyInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("File copy cancelled by user")
+
+        src = getattr(params, "source_path", "")
+        dst = getattr(params, "dest_path", "")
+        overwrite = getattr(params, "overwrite", False)
+
+        service = get_file_service()
+        res = service.copy_file(src, dst, overwrite=overwrite)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string", "description": "Source file path"},
+                    "dest_path": {"type": "string", "description": "Destination file path"},
+                    "overwrite": {"type": "boolean", "default": False},
+                },
+                "required": ["source_path", "dest_path"],
+            },
+            requires_approval=False,
+            timeout_seconds=15.0,
+        )
+
+
+class FileMoveTool(BaseTool):
+    """Tool to move or rename a file between authorized locations."""
+
+    name = "file_move"
+    description = "Move or rename a file between authorized locations."
+    category = PermissionCategory.FILE_WRITE
+    input_schema = FileMoveInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("File move cancelled by user")
+
+        src = getattr(params, "source_path", "")
+        dst = getattr(params, "dest_path", "")
+        overwrite = getattr(params, "overwrite", False)
+
+        service = get_file_service()
+        res = service.move_file(src, dst, overwrite=overwrite)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.MEDIUM,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string", "description": "Source file path"},
+                    "dest_path": {"type": "string", "description": "Destination file path"},
+                    "overwrite": {"type": "boolean", "default": False},
+                },
+                "required": ["source_path", "dest_path"],
+            },
+            requires_approval=True,
+            timeout_seconds=15.0,
+        )
+
+
+class FileDeleteTool(BaseTool):
+    """Tool to delete a file or directory using Windows Recycle Bin (default) or permanent deletion with confirmation."""
+
+    name = "file_delete"
+    description = "Delete a file or directory inside an authorized path. By default, moves safely to Windows Recycle Bin."
+    category = PermissionCategory.FILE_DELETE
+    input_schema = FileDeleteInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("File deletion cancelled by user")
+
+        target_path = getattr(params, "file_path", "")
+        permanent = getattr(params, "permanent", False)
+
+        service = get_file_service()
+        res = service.delete_file(target_path, permanent=permanent)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.HIGH,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Target file or directory path"},
+                    "permanent": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Permanently delete without Recycle Bin",
+                    },
+                },
+                "required": ["file_path"],
+            },
+            requires_approval=True,
+            timeout_seconds=15.0,
+        )
+
+
+class FileCompareDiffTool(BaseTool):
+    """Tool to compute unified diff between two files."""
+
+    name = "file_compare_diff"
+    description = "Compare two text files and generate a unified diff."
+    category = PermissionCategory.FILE_READ
+    input_schema = FileCompareDiffInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Diff cancelled by user")
+
+        fa = getattr(params, "file_path_a", "")
+        fb = getattr(params, "file_path_b", "")
+        max_lines = getattr(params, "max_diff_lines", 500)
+
+        service = get_file_service()
+        res = service.compare_diff(fa, fb, max_diff_lines=max_lines)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "file_path_a": {"type": "string", "description": "First file path"},
+                    "file_path_b": {"type": "string", "description": "Second file path"},
+                    "max_diff_lines": {"type": "integer", "default": 500},
+                },
+                "required": ["file_path_a", "file_path_b"],
+            },
+            requires_approval=False,
+            timeout_seconds=15.0,
+        )
+
+
+class FileFindDuplicatesTool(BaseTool):
+    """Tool to find duplicate files via size clustering and SHA-256 hashes."""
+
+    name = "file_find_duplicates"
+    description = (
+        "Scan an authorized directory for duplicate files based on content SHA-256 hashes."
+    )
+    category = PermissionCategory.FILE_READ
+    input_schema = FileFindDuplicatesInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Duplicate scan cancelled by user")
+
+        dir_path = getattr(params, "directory_path", "")
+        min_size = getattr(params, "min_size_bytes", 1)
+        max_files = getattr(params, "max_files", 500)
+
+        service = get_file_service()
+        res = service.find_duplicates(dir_path, min_size_bytes=min_size, max_files=max_files)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "directory_path": {"type": "string", "description": "Directory to scan"},
+                    "min_size_bytes": {"type": "integer", "default": 1},
+                    "max_files": {"type": "integer", "default": 500},
+                },
+                "required": ["directory_path"],
+            },
+            requires_approval=False,
+            timeout_seconds=30.0,
+        )
+
+
+class FileArchiveCreateTool(BaseTool):
+    """Tool to create a ZIP archive of authorized files and directories."""
+
+    name = "file_archive_create"
+    description = "Create a safe ZIP archive from specified authorized files and directories."
+    category = PermissionCategory.FILE_ARCHIVE
+    input_schema = FileArchiveCreateInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Archive creation cancelled by user")
+
+        archive_path = getattr(params, "archive_path", "")
+        sources = getattr(params, "source_paths", [])
+
+        service = get_file_service()
+        res = service.create_archive(archive_path, sources)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "archive_path": {"type": "string", "description": "Output .zip file path"},
+                    "source_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "List of paths to archive",
+                    },
+                },
+                "required": ["archive_path", "source_paths"],
+            },
+            requires_approval=False,
+            timeout_seconds=30.0,
+        )
+
+
+class FileArchiveInspectTool(BaseTool):
+    """Tool to inspect ZIP archive contents, sizes, and compression ratios without extracting."""
+
+    name = "file_archive_inspect"
+    description = "Inspect the entries, uncompressed sizes, and compression ratio of a ZIP archive without extracting it."
+    category = PermissionCategory.FILE_ARCHIVE
+    input_schema = FileArchiveInspectInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Archive inspection cancelled by user")
+
+        archive_path = getattr(params, "archive_path", "")
+        service = get_file_service()
+        res = service.inspect_archive(archive_path)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "archive_path": {"type": "string", "description": "Path to .zip archive"},
+                },
+                "required": ["archive_path"],
+            },
+            requires_approval=False,
+            timeout_seconds=15.0,
+        )
+
+
+class FileArchiveExtractTool(BaseTool):
+    """Tool to extract a ZIP archive with Zip Slip, bomb, and reserved name defenses."""
+
+    name = "file_archive_extract"
+    description = "Safely extract a ZIP archive into an authorized target directory with Zip Slip and bomb defenses."
+    category = PermissionCategory.FILE_ARCHIVE
+    input_schema = FileArchiveExtractInput
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Archive extraction cancelled by user")
+
+        archive_path = getattr(params, "archive_path", "")
+        target_dir = getattr(params, "target_directory", "")
+
+        service = get_file_service()
+        res = service.extract_archive(archive_path, target_dir)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.MEDIUM,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "archive_path": {"type": "string", "description": "Path to .zip archive"},
+                    "target_directory": {
+                        "type": "string",
+                        "description": "Target directory to extract files into",
+                    },
+                },
+                "required": ["archive_path", "target_directory"],
+            },
+            requires_approval=True,
+            timeout_seconds=30.0,
         )

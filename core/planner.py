@@ -1207,6 +1207,209 @@ class AgentPlanner:
 
         return None
 
+    def _detect_coding_agent_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Recognize Persian and English delegation prompts for the Antigravity coding agent."""
+        norm = goal.lower().strip()
+
+        # Check status or health
+        if "coding_agent_status" in tool_names and any(
+            k in norm
+            for k in (
+                "وضعیت آنتی گرویتی",
+                "وضعیت کدنویس",
+                "antigravity status",
+                "coding agent status",
+            )
+        ):
+            return {
+                "description": "Check Antigravity coding agent installation and readiness",
+                "step_type": "tool_call",
+                "tool_name": "coding_agent_status",
+                "parameters": {},
+                "dependencies": [],
+            }
+
+        # Check verification
+        if "coding_agent_verify_task" in tool_names and any(
+            k in norm
+            for k in (
+                "تایید تغییرات کد",
+                "بررسی ریپو",
+                "verify code",
+                "verify workspace",
+                "check repo",
+            )
+        ):
+            return {
+                "description": "Independently verify git status, diff, tests, and linter",
+                "step_type": "tool_call",
+                "tool_name": "coding_agent_verify_task",
+                "parameters": {"run_tests": True, "run_linter": True},
+                "dependencies": [],
+            }
+
+        # Check delegation
+        if "coding_agent_delegate_task" in tool_names and any(
+            k in norm
+            for k in (
+                "کد بنویس",
+                "برنامه نویسی",
+                "توسعه دهنده",
+                "با آنتی گرویتی",
+                "delegate to antigravity",
+                "write code with agy",
+                "coding agent",
+                "fix bug with agy",
+                "implement feature",
+            )
+        ):
+            return {
+                "description": f"Delegate programming task to Google Antigravity: {goal}",
+                "step_type": "tool_call",
+                "tool_name": "coding_agent_delegate_task",
+                "parameters": {"prompt": goal, "auto_verify": True},
+                "dependencies": [],
+            }
+
+        return None
+
+    def _detect_file_modification_intent(
+        self, goal: str, tool_names: set[str]
+    ) -> dict[str, Any] | None:
+        """Recognize document extraction, file write/edit, diff, duplicate and archive operations."""
+        norm = goal.lower().strip()
+
+        # Document extraction (.pdf, .docx, .xlsx, .pptx, etc.)
+        if "file_extract_document" in tool_names and any(
+            k in norm
+            for k in (
+                "استخراج متن",
+                "خواندن pdf",
+                "فایل ورد",
+                "اکسل",
+                "پاورپوینت",
+                "extract document",
+                "read pdf",
+                "read docx",
+                "read xlsx",
+            )
+        ):
+            target_file = ""
+            for quote_mark in ('"', "'"):
+                if quote_mark in goal:
+                    parts = goal.split(quote_mark)
+                    if len(parts) >= 3:
+                        target_file = parts[1]
+                        break
+            return {
+                "description": f"Extract document text and structure from {target_file or 'target file'}",
+                "step_type": "tool_call",
+                "tool_name": "file_extract_document",
+                "parameters": {"file_path": target_file},
+                "dependencies": [],
+            }
+
+        # Duplicates
+        if "file_find_duplicates" in tool_names and any(
+            k in norm
+            for k in ("فایل های تکراری", "تکراری ها", "find duplicates", "duplicate files")
+        ):
+            return {
+                "description": "Scan directory for duplicate files via SHA-256 hashes",
+                "step_type": "tool_call",
+                "tool_name": "file_find_duplicates",
+                "parameters": {"directory_path": "."},
+                "dependencies": [],
+            }
+
+        # Diff / Compare
+        if "file_compare_diff" in tool_names and any(
+            k in norm for k in ("مقایسه دو فایل", "تفاوت فایل", "compare files", "diff files")
+        ):
+            return {
+                "description": "Compare two files and generate unified diff",
+                "step_type": "tool_call",
+                "tool_name": "file_compare_diff",
+                "parameters": {"file_path_a": "", "file_path_b": ""},
+                "dependencies": [],
+            }
+
+        # Archive create
+        if "file_archive_create" in tool_names and any(
+            k in norm for k in ("زیپ کن", "فشرده سازی", "create zip", "archive files")
+        ):
+            return {
+                "description": "Create safe ZIP archive",
+                "step_type": "tool_call",
+                "tool_name": "file_archive_create",
+                "parameters": {"archive_path": "archive.zip", "source_paths": []},
+                "dependencies": [],
+            }
+
+        # Archive extract
+        if "file_archive_extract" in tool_names and any(
+            k in norm for k in ("استخراج زیپ", "از فشرده خارج کن", "extract zip", "unzip")
+        ):
+            return {
+                "description": "Safely extract ZIP archive",
+                "step_type": "tool_call",
+                "tool_name": "file_archive_extract",
+                "parameters": {"archive_path": "", "target_directory": "."},
+                "dependencies": [],
+            }
+
+        return None
+
+    def _detect_terminal_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Recognize restricted terminal commands."""
+        norm = goal.lower().strip()
+
+        if "terminal_execute_command" not in tool_names:
+            return None
+
+        if any(k in norm for k in ("وضعیت گیت", "git status")):
+            return {
+                "description": "Check git repository status",
+                "step_type": "tool_call",
+                "tool_name": "terminal_execute_command",
+                "parameters": {"command_id": "git_status"},
+                "dependencies": [],
+            }
+        elif any(k in norm for k in ("تغییرات گیت", "git diff")):
+            return {
+                "description": "Check git working tree diff",
+                "step_type": "tool_call",
+                "tool_name": "terminal_execute_command",
+                "parameters": {"command_id": "git_diff"},
+                "dependencies": [],
+            }
+        elif any(k in norm for k in ("تاریخچه گیت", "لاگ گیت", "git log")):
+            return {
+                "description": "Check git commit history",
+                "step_type": "tool_call",
+                "tool_name": "terminal_execute_command",
+                "parameters": {"command_id": "git_log", "parameters": {"limit": 10}},
+                "dependencies": [],
+            }
+        elif any(k in norm for k in ("تست ها را اجرا کن", "اجرای تست", "run tests", "pytest")):
+            return {
+                "description": "Run pytest test suite",
+                "step_type": "tool_call",
+                "tool_name": "terminal_execute_command",
+                "parameters": {"command_id": "run_tests"},
+                "dependencies": [],
+            }
+        elif any(k in norm for k in ("لینتر", "بررسی فرمت", "ruff check", "run linter")):
+            return {
+                "description": "Run ruff code linter",
+                "step_type": "tool_call",
+                "tool_name": "terminal_execute_command",
+                "parameters": {"command_id": "run_linter"},
+                "dependencies": [],
+            }
+
+        return None
+
     def _build_fallback_plan_dict(
         self, goal: str, available_tools: list[ToolDefinition] | None = None
     ) -> dict[str, Any]:
@@ -1226,13 +1429,22 @@ class AgentPlanner:
         audio_step = self._detect_audio_intent(goal, tool_names)
         if audio_step:
             steps.append(audio_step)
-        # Priority 2: Check browser agent intent
+        # Priority 2: Check coding agent intent
+        elif coding_step := self._detect_coding_agent_intent(goal, tool_names):
+            steps.append(coding_step)
+        # Priority 3: Check terminal intent
+        elif term_step := self._detect_terminal_intent(goal, tool_names):
+            steps.append(term_step)
+        # Priority 4: Check file modification & document extraction intent
+        elif file_step := self._detect_file_modification_intent(goal, tool_names):
+            steps.append(file_step)
+        # Priority 5: Check browser agent intent
         elif browser_step := self._detect_browser_intent(goal, tool_names):
             steps.append(browser_step)
-        # Priority 3: Check system diagnostic intent
+        # Priority 6: Check system diagnostic intent
         elif sys_step := self._detect_system_intent(goal, tool_names):
             steps.append(sys_step)
-        # Priority 4: Check desktop control intent
+        # Priority 7: Check desktop control intent
         elif desk_step := self._detect_desktop_intent(goal, tool_names):
             steps.append(desk_step)
         # Priority 4: Match mock search if query mentions search/find

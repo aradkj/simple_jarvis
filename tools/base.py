@@ -49,6 +49,10 @@ class ToolResult:
     def cancelled(cls, reason: str = "Execution cancelled by user", **metadata: Any) -> ToolResult:
         return cls(status=ToolExecutionStatus.CANCELLED, error=reason, metadata=metadata)
 
+    @property
+    def is_success(self) -> bool:
+        return self.status == ToolExecutionStatus.SUCCESS
+
 
 class BaseTool(ABC):
     """Abstract base class for all JARVIS tools."""

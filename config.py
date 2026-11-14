@@ -395,6 +395,92 @@ class Settings(BaseSettings):
         description="Allow navigation to localhost/loopback addresses (only True in testing)",
     )
 
+    # Phase 8 File System, Terminal & Antigravity Coding Agent
+    file_modification_enabled: bool = Field(
+        default=True,
+        description="Enable controlled file modification (create, edit, copy, move, rename, delete, archive)",
+    )
+    file_recycle_bin_enabled: bool = Field(
+        default=True,
+        description="Enable recoverable file deletion through Windows Recycle Bin",
+    )
+    file_archive_max_entries: int = Field(
+        default=1000,
+        ge=10,
+        le=50000,
+        description="Maximum entries allowed inside an inspected or extracted archive",
+    )
+    file_archive_max_total_size_bytes: int = Field(
+        default=100 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=1024 * 1024 * 1024,
+        description="Maximum total uncompressed bytes allowed during archive extraction (100MB default)",
+    )
+    file_archive_max_ratio: float = Field(
+        default=100.0,
+        ge=2.0,
+        le=1000.0,
+        description="Maximum compression ratio threshold for archive bomb defense",
+    )
+    terminal_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 8 Restricted Terminal Agent with fixed command registry",
+    )
+    terminal_default_timeout_seconds: float = Field(
+        default=60.0,
+        ge=5.0,
+        le=600.0,
+        description="Default timeout in seconds for restricted terminal commands",
+    )
+    terminal_max_timeout_seconds: float = Field(
+        default=300.0,
+        ge=10.0,
+        le=1800.0,
+        description="Maximum allowed timeout override for terminal commands",
+    )
+    terminal_max_output_chars: int = Field(
+        default=50000,
+        ge=1000,
+        le=500000,
+        description="Maximum output characters captured from a terminal command",
+    )
+    antigravity_enabled: bool = Field(
+        default=True,
+        description="Enable Phase 8 Antigravity Coding Agent CLI integration",
+    )
+    antigravity_executable_path: str = Field(
+        default="",
+        description="Path to installed 'agy' executable (discovered from PATH if empty)",
+    )
+    antigravity_default_model: str = Field(
+        default="gemini-3.8-flash-high",
+        description="Default model for Antigravity coding tasks",
+    )
+    antigravity_timeout_seconds: float = Field(
+        default=300.0,
+        ge=10.0,
+        le=1800.0,
+        description="Maximum execution timeout in seconds for an Antigravity task",
+    )
+    antigravity_max_remediation_retries: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Maximum automatic remediation iterations if verification tests fail",
+    )
+    antigravity_persistent_session_enabled: bool = Field(
+        default=False,
+        description="Enable persistent NDJSON streaming session if supported (one-shot is default)",
+    )
+    antigravity_run_tests_on_verify: bool = Field(
+        default=True,
+        description="Whether to run tests automatically during verification",
+    )
+    antigravity_authorized_workspaces: list[str] = Field(
+        default_factory=list,
+        description="Explicit allowlist of canonical directory paths Antigravity is authorized to modify",
+    )
+
     # Storage and Log Directories
     data_dir: Path = Field(default_factory=get_data_dir, description="Persistent data storage path")
     logs_dir: Path = Field(default_factory=get_logs_dir, description="Log files destination path")
