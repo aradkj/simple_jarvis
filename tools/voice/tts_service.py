@@ -464,9 +464,8 @@ class BritishNeuralTTSService(BaseTTSService):
             )
         key_secret = getattr(self.settings, "openai_api_key", None)
         key = key_secret.get_secret_value() if key_secret else ""
-        base_url = getattr(self.settings, "openai_base_url", "https://api.openai.com/v1").rstrip(
-            "/"
-        )
+        raw_url = getattr(self.settings, "openai_base_url", None) or "https://api.openai.com/v1"
+        base_url = str(raw_url).rstrip("/")
 
         if not key:
             logger.warning("OpenAI API key not configured; falling back to Windows native SAPI.")

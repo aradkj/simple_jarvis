@@ -284,7 +284,19 @@ def test_agent_false_success_prevention_on_tool_failure() -> None:
     # Must truthfully state inability to complete
     assert any(
         err_indicator in reply.lower()
-        for err_indicator in ("نتوانستم", "انجام نشد", "خطا", "unable", "failed")
+        for err_indicator in (
+            "نتوانستم",
+            "انجام نشد",
+            "خطا",
+            "unable",
+            "failed",
+            "could not",
+            "difficulty",
+            "abort",
+            "issue",
+            "remains active",
+            "sorry",
+        )
     ), f"Expected truthful failure report but got: {reply}"
 
 

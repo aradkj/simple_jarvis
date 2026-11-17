@@ -14,6 +14,8 @@ Tests:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from core.conversation_session import ConversationSessionManager
 from core.events import EventBus
 from core.permissions import PermissionCategory, StrictDefaultDenyPermissionManager
@@ -23,12 +25,20 @@ from tools.filesystem.file_tools import FileCreateDirectoryTool
 from tools.windows.application_tools import WindowsAppLaunchTool
 
 
-def test_multi_turn_project_and_nested_folder_flow() -> None:
+def test_multi_turn_project_and_nested_folder_flow(tmp_path: Path) -> None:
     """End-to-end multi-turn conversation test for project discovery, app launch, nested folder, and rename."""
     sess_mgr = ConversationSessionManager.get_instance()
     sess_id = "test_multi_turn_pc_shop_session"
     sess_mgr.reset_session(sess_id)
     session = sess_mgr.get_or_create_session(sess_id)
+
+    # In CI environments where C:\docker\pc-shop is absent, register a simulated workspace
+    if not Path("C:/docker/pc-shop").is_dir():
+        fake_shop = tmp_path / "pc-shop"
+        fake_shop.mkdir(parents=True, exist_ok=True)
+        (fake_shop / ".git").mkdir(exist_ok=True)
+        sess_mgr.register_project("pc shop", fake_shop)
+        sess_mgr.register_project("pc-shop", fake_shop)
 
     # --- Turn 1: Find my PC Shop project ---
     t1_text, t1_inf = sess_mgr.resolve_contextual_references("Find my PC Shop project", [], sess_id)

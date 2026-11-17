@@ -10,12 +10,33 @@ from pathlib import Path
 
 import pytest
 
-from core.files.project_resolver import ProjectResolver, get_project_resolver
+from core.files.project_resolver import ProjectResolver
 
 
 @pytest.fixture
-def resolver() -> ProjectResolver:
-    return get_project_resolver()
+def resolver(tmp_path: Path) -> ProjectResolver:
+    res = ProjectResolver()
+    if not Path("C:/docker/pc-shop").is_dir():
+        pc_shop_dir = tmp_path / "pc-shop"
+        pc_shop_dir.mkdir(parents=True, exist_ok=True)
+        (pc_shop_dir / ".git").mkdir(exist_ok=True)
+        (pc_shop_dir / "package.json").write_text('{"name": "pc-shop"}', encoding="utf-8")
+
+        warehouse_dir = tmp_path / "warehouse"
+        warehouse_dir.mkdir(parents=True, exist_ok=True)
+        (warehouse_dir / ".git").mkdir(exist_ok=True)
+        (warehouse_dir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+
+        ocr_dir = tmp_path / "OCR"
+        ocr_dir.mkdir(parents=True, exist_ok=True)
+        (ocr_dir / ".git").mkdir(exist_ok=True)
+        (ocr_dir / "README.md").write_text(
+            "# Document Processing Platform\nOCR engine", encoding="utf-8"
+        )
+
+        res.get_candidate_roots = lambda: [tmp_path]
+        res._cached_projects.clear()
+    return res
 
 
 def test_pc_shop_project_discovery(resolver: ProjectResolver) -> None:

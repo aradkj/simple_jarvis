@@ -22,7 +22,8 @@ class TestVSCodeResolution:
     def test_resolve_vscode_executable_on_host(self):
         disc = get_windows_app_discovery()
         exe = disc.resolve_vscode_executable()
-        assert exe is not None
+        if exe is None:
+            pytest.skip("Visual Studio Code is not installed on this test host.")
         assert isinstance(exe, Path)
         assert exe.is_file()
         assert exe.name.lower() in ("code.exe", "code")
@@ -34,11 +35,28 @@ class TestVSCodeResolution:
             assert resolved is not None
             assert "Code.exe" in str(resolved)
 
-    def test_target_validator_resolves_cmd_wrapper(self):
-        # Even if passed 'code.cmd', TargetValidator resolves to Code.exe via which/parent
-        resolved = TargetValidator.validate_executable_path("code.cmd")
+    def test_target_validator_resolves_cmd_wrapper(self, tmp_path: Path):
+        import shutil
+
+        # If code.cmd exists in PATH, test live resolution
+        if shutil.which("code.cmd"):
+            resolved = TargetValidator.validate_executable_path("code.cmd")
+            assert resolved.suffix.lower() == ".exe"
+            assert resolved.is_file()
+            return
+
+        # Headless CI environment: test wrapper resolution logic with synthetic structure
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_cmd = bin_dir / "code.cmd"
+        fake_cmd.write_text("@echo off\n", encoding="utf-8")
+        fake_exe = tmp_path / "Code.exe"
+        fake_exe.write_text("fake binary", encoding="utf-8")
+
+        resolved = TargetValidator.validate_executable_path(str(fake_cmd))
         assert resolved.suffix.lower() == ".exe"
         assert resolved.is_file()
+        assert resolved == fake_exe.resolve()
 
     def test_target_validator_rejects_missing_file(self):
         with pytest.raises(TargetValidationError):
@@ -53,6 +71,9 @@ class TestWindowsControlServiceResolution:
         return WindowsControlService()
 
     def test_resolve_code_aliases(self, service):
+        disc = get_windows_app_discovery()
+        is_host_installed = disc.resolve_vscode_executable() is not None
+
         for alias in (
             "code",
             "vscode",
@@ -64,7 +85,8 @@ class TestWindowsControlServiceResolution:
             assert app_info.app_id in ("code", "vscode")
             assert app_info.is_installed is True
             assert app_info.executable_path.lower().endswith("code.exe")
-            assert Path(app_info.executable_path).is_file()
+            if is_host_installed:
+                assert Path(app_info.executable_path).is_file()
 
     def test_resolve_unknown_application_raises(self, service):
         with pytest.raises(ApplicationNotFoundError):

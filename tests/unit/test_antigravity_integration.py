@@ -17,8 +17,19 @@ from integrations.antigravity.workspace_lock import WorkspaceLockManager
 from integrations.base import HealthState
 
 
-def test_cli_discovery():
+def test_cli_discovery(tmp_path: Path):
     cli = AntigravityCLI()
+    if not cli.is_available():
+        mock_agy = tmp_path / "agy.exe"
+        mock_agy.write_text("@echo off\n", encoding="utf-8")
+        cli.executable_path = mock_agy
+        with patch.object(cli, "detect_version", return_value="1.5.10"):
+            exe = cli.locate_executable()
+            assert exe.is_file()
+            assert cli.is_available() is True
+            assert cli.detect_version() == "1.5.10"
+        return
+
     # The environment has agy.exe at C:\Users\aradb\AppData\Local\agy\bin\agy.exe
     exe = cli.locate_executable()
     assert exe.is_file()
@@ -116,6 +127,33 @@ def test_verifier(tmp_path: Path):
 
 def test_adapter_operations(tmp_path: Path):
     adapter = AntigravityIntegration()
+    if not adapter.cli.is_available():
+        mock_agy = tmp_path / "agy.exe"
+        mock_agy.write_text("@echo off\n", encoding="utf-8")
+        adapter.cli.executable_path = mock_agy
+        with patch.object(adapter.cli, "detect_version", return_value="1.5.10"):
+            assert adapter.connect() is True
+            assert adapter.health_state == HealthState.HEALTHY
+            status = adapter.get_status()
+            assert status["connected"] is True
+            assert status["cli_available"] is True
+            caps = adapter.get_capabilities()
+            assert "delegate_task" in caps.operations
+            assert "verify_workspace" in caps.operations
+            assert "install_ide_hooks" in caps.operations
+            with patch.object(adapter.cli, "execute_task", return_value=(0, ["Done."])):
+                res = adapter.execute(
+                    "delegate_task",
+                    {"prompt": "Echo test", "workspace_path": str(tmp_path), "auto_verify": False},
+                )
+                assert res.success is True
+                assert res.data["exit_code"] == 0
+                task_id = res.data["task_id"]
+                st_res = adapter.execute("get_task_status", {"task_id": task_id})
+                assert st_res.success is True
+                assert st_res.data["state"] == TaskLifecycleState.COMPLETED.value
+            return
+
     assert adapter.connect() is True
     assert adapter.health_state == HealthState.HEALTHY
 
