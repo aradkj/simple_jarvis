@@ -505,6 +505,36 @@ class FileDocumentExtractInput(BaseModel):
     )
 
 
+class FileCreateDirectoryInput(BaseModel):
+    directory_path: str = Field(
+        default="",
+        description="Target directory or folder path to create (e.g. on Desktop, Documents, or absolute path)",
+    )
+    exist_ok: bool = Field(
+        default=True,
+        description="Whether to succeed idempotently without error if directory already exists",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for alias in (
+                "directory_path",
+                "path",
+                "target_path",
+                "dir_path",
+                "folder_path",
+                "folder",
+                "directory",
+            ):
+                val = data.get(alias)
+                if val is not None and str(val).strip():
+                    data["directory_path"] = str(val).strip()
+                    break
+        return data
+
+
 class FileWriteTextInput(BaseModel):
     file_path: str = Field(default="", description="Target file path to write")
     content: str = Field(default="", description="Text content to write")
@@ -693,6 +723,78 @@ class FileDocumentExtractTool(BaseTool):
             },
             requires_approval=False,
             timeout_seconds=20.0,
+        )
+
+
+class FileCreateDirectoryTool(BaseTool):
+    """Tool to safely, idempotently, and reliably create a directory or folder in an authorized location."""
+
+    name = "file_create_directory"
+    description = (
+        "Create a directory or folder in an authorized location (Desktop, Documents, Downloads, etc.). "
+        "Supports Persian and Unicode names, spaces, nested directories, and idempotent existence checks."
+    )
+    category = PermissionCategory.FILE_WRITE
+    input_schema = FileCreateDirectoryInput
+
+    def __init__(self, file_service: Any = None) -> None:
+        self.file_service = file_service
+
+    def execute(
+        self,
+        params: BaseModel | dict[str, Any] | None = None,
+        context: ExecutionContext | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        if context and context.is_cancelled():
+            return ToolResult.cancelled("Directory creation cancelled by user")
+
+        if isinstance(params, dict):
+            target_path = params.get("directory_path", kwargs.get("directory_path", ""))
+            exist_ok = params.get("exist_ok", kwargs.get("exist_ok", True))
+            parents = params.get("parents", kwargs.get("parents", True))
+        elif params is not None and hasattr(params, "directory_path"):
+            target_path = getattr(params, "directory_path", "")
+            exist_ok = getattr(params, "exist_ok", True)
+            parents = getattr(params, "parents", True)
+        else:
+            target_path = kwargs.get("directory_path", "")
+            exist_ok = kwargs.get("exist_ok", True)
+            parents = kwargs.get("parents", True)
+
+        if not target_path or not str(target_path).strip():
+            return ToolResult.failed("Target directory path cannot be empty.")
+
+        service = self.file_service or get_file_service()
+        res = service.create_directory(str(target_path).strip(), exist_ok=exist_ok, parents=parents)
+        if not res.success:
+            return ToolResult.failed(res.message)
+        return ToolResult.success(data=res.details, message=res.message)
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "directory_path": {
+                        "type": "string",
+                        "description": "Path or destination of the directory to create (e.g. on Desktop or Documents)",
+                    },
+                    "exist_ok": {
+                        "type": "boolean",
+                        "description": "Whether to succeed idempotently if directory already exists",
+                        "default": True,
+                    },
+                },
+                "required": ["directory_path"],
+            },
+            requires_approval=False,
+            timeout_seconds=15.0,
         )
 
 

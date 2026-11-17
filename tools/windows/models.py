@@ -48,6 +48,8 @@ class AppInfo(BaseModel):
         default=False, description="Whether one or more process instances are running"
     )
     running_pids: list[int] = Field(default_factory=list, description="List of running process IDs")
+    launch_type: str = Field(default="exe", description="Launch method: 'exe' or 'aumid'")
+    is_packaged: bool = Field(default=False, description="Whether application is packaged/UWP")
 
 
 class ProcessMetadata(BaseModel):

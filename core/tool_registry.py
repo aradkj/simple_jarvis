@@ -8,6 +8,7 @@ from core.events import AgentEvent, AgentEventType, EventBus
 from core.execution_context import ExecutionContext
 from core.permissions import (
     BasePermissionManager,
+    PermissionCategory,
     PermissionDecision,
     PermissionRequest,
     StrictDefaultDenyPermissionManager,
@@ -65,6 +66,25 @@ class ToolRegistry:
     def list_tool_names(self) -> list[str]:
         """Return names of all registered tools."""
         return list(self._tools.keys())
+
+    def get_capabilities(self) -> dict[str, dict[str, Any]]:
+        """Return structured capability metadata for all registered tools."""
+        return {name: tool.get_capabilities() for name, tool in self._tools.items()}
+
+    def find_tools_for_operation(self, operation: str) -> list[BaseTool]:
+        """Find tools supporting a specific operation keyword (e.g. 'mkdir', 'launch_app')."""
+        norm_op = operation.lower().strip()
+        matches: list[BaseTool] = []
+        for tool in self._tools.values():
+            caps = tool.get_capabilities()
+            ops = [o.lower() for o in caps.get("operations", [])]
+            if norm_op in ops or any(norm_op in o for o in ops) or norm_op in tool.name.lower():
+                matches.append(tool)
+        return matches
+
+    def find_tools_by_category(self, category: PermissionCategory) -> list[BaseTool]:
+        """Return tools belonging to a given permission category."""
+        return [tool for tool in self._tools.values() if tool.category == category]
 
     def execute_tool(
         self,

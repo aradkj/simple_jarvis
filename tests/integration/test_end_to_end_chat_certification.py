@@ -274,6 +274,7 @@ def test_cert_power_battery_status_query(cert_settings: Settings) -> None:
 
 def test_cert_notepad_launch_minimize_and_close(cert_settings: Settings) -> None:
     """Verify high-risk app launch approval lifecycle, execution, and cleanup."""
+    cert_settings.agent_auto_approve_low_risk = False
     svc = WindowsControlService(settings=cert_settings)
     agent = JARVISAgent(settings=cert_settings)
     agent.initialize()

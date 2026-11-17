@@ -62,6 +62,12 @@ class BaseTool(ABC):
     category: PermissionCategory
     input_schema: type[BaseModel]
 
+    # Universal Structured Capability Metadata
+    operations: list[str] = []
+    verification_strategy: str = "exit_code_zero"
+    reversible: bool = False
+    timeout_seconds: float = 30.0
+
     def __init__(self) -> None:
         if not hasattr(self, "name") or not self.name:
             raise ValueError(f"Tool {self.__class__.__name__} must define a unique 'name'.")
@@ -73,6 +79,18 @@ class BaseTool(ABC):
             raise ValueError(
                 f"Tool {self.__class__.__name__} must define a Pydantic 'input_schema'."
             )
+
+    def get_capabilities(self) -> dict[str, Any]:
+        """Return structured capability metadata for this tool."""
+        return {
+            "name": self.name,
+            "category": self.category.value,
+            "description": self.description,
+            "operations": getattr(self, "operations", [self.name]),
+            "verification_strategy": getattr(self, "verification_strategy", "exit_code_zero"),
+            "reversible": getattr(self, "reversible", False),
+            "timeout_seconds": getattr(self, "timeout_seconds", 30.0),
+        }
 
     def validate_input(self, params: dict[str, Any]) -> BaseModel:
         """Validate input parameters against the tool's schema."""

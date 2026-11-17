@@ -12,14 +12,22 @@ class VoiceState(StrEnum):
     """Current state of the voice intelligence subsystem."""
 
     IDLE = "idle"
-    LISTENING = "listening"
     WAKE_DETECTED = "wake_detected"
+    SESSION_ACTIVATING = "session_activating"
+    LISTENING = "listening"
     RECORDING = "recording"
     TRANSCRIBING = "transcribing"
+    UNDERSTANDING = "understanding"
+    THINKING = "thinking"
+    GENERATING_RESPONSE = "generating_response"
     SPEAKING = "speaking"
     INTERRUPTED = "interrupted"
+    WAITING = "waiting"
+    SESSION_STOPPING = "session_stopping"
+    SESSION_ENDED = "session_ended"
     MUTED = "muted"
     ERROR = "error"
+    ERROR_RECOVERY = "error_recovery"
 
 
 @dataclass

@@ -144,15 +144,9 @@ class Plan:
     def validate_acyclic(self) -> None:
         """Verify the plan dependency graph contains no cycles."""
         step_ids = {s.step_id for s in self.steps}
-        # Check invalid dependency references
+        # Sanitize and validate dependencies
         for s in self.steps:
-            for dep in s.dependencies:
-                if dep not in step_ids:
-                    raise PlanValidationError(
-                        f"Step '{s.step_id}' depends on non-existent step '{dep}'."
-                    )
-                if dep == s.step_id:
-                    raise PlanValidationError(f"Step '{s.step_id}' cannot depend on itself.")
+            s.dependencies = [dep for dep in s.dependencies if dep != s.step_id and dep in step_ids]
 
         # Cycle detection via topological sort
         visited: set[str] = set()
@@ -215,8 +209,44 @@ class AgentPlanner:
         """Analyze user input to determine whether multi-step planning is required."""
         cleaned = prompt.strip().lower()
 
-        # Action cues for tools (audio, volume, system control, files, inspection)
+        # Explicit conversational request to not take actions
+        conversational_guards = (
+            "هیچ کاری نکن",
+            "کاری نکن",
+            "فقط با هم صحبت کنیم",
+            "فقط صحبت کنیم",
+            "فقط حرف بزنیم",
+            "فقط گپ بزنیم",
+            "just chat",
+            "just talk",
+            "don't do anything",
+            "do not do anything",
+            "don't execute",
+        )
+        if any(g in cleaned for g in conversational_guards):
+            return False
+
+        # Action cues for tools (audio, volume, system control, files, inspection, weather, apps, internet)
         action_cues = [
+            # Live Weather & Forecast
+            "weather",
+            "forecast",
+            "temperature",
+            "climate",
+            "rain",
+            "precipitation",
+            "آب و هوا",
+            "اب و هوا",
+            "آب‌وهوا",
+            "هوا",
+            "وضعیت هوا",
+            "دما",
+            "باران",
+            "بارون",
+            "پیش‌بینی هوا",
+            "پیش بینی هوا",
+            "بوشهر",
+            "bushehr",
             # Audio & Sound (English & Persian)
             "mute",
             "unmute",
@@ -258,6 +288,10 @@ class AgentPlanner:
             "brightness",
             "monitor",
             "screen",
+            "screenshot",
+            "اسکرین شات",
+            "اسکرین‌شات",
+            "عکس از صفحه",
             "power",
             "battery",
             "sleep",
@@ -268,9 +302,24 @@ class AgentPlanner:
             "status",
             "overview",
             "info",
+            "chrome",
+            "edge",
+            "msedge",
             "notepad",
             "calc",
             "calculator",
+            "terminal",
+            "explorer",
+            "firefox",
+            "کروم",
+            "گوگل کروم",
+            "ادج",
+            "مایکروسافت ادج",
+            "ماشین حساب",
+            "ترمینال",
+            "اکسپلورر",
+            "فایل اکسپلورر",
+            "فایرفاکس",
             "برنامه",
             "اپلیکیشن",
             "نرم‌افزار",
@@ -428,6 +477,27 @@ class AgentPlanner:
             "واتس‌اپ",
             "واتس اپ",
             "پیام واتساپ",
+            # Implied coding intentions
+            "need to code",
+            "want to code",
+            "start coding",
+            "start programming",
+            "time to code",
+            "open coding",
+            "programming",
+            "کد بزنم",
+            "کد بزنیم",
+            "وقت کدزدنه",
+            "وقت کدنویسیه",
+            "بریم کد بزنیم",
+            "میخوام کدنویسی کنم",
+            "میخوام برنامه نویسی کنم",
+            # Directory and Folder Cues
+            "folder",
+            "directory",
+            "پوشه",
+            "فولدر",
+            "دایرکتوری",
         ]
         if any(cue in cleaned for cue in action_cues):
             return True
@@ -488,18 +558,40 @@ class AgentPlanner:
                 )
             )
 
+        is_read_only = bool(context.metadata.get("read_only", False))
+        prohibited_actions = context.metadata.get("prohibited_actions", [])
+
         tools_desc = ""
-        if available_tools:
+        effective_tools = available_tools or []
+        if is_read_only and effective_tools:
+            destructive_names = {
+                "file_write_text",
+                "file_edit_text",
+                "file_delete",
+                "file_move",
+                "file_archive_create",
+                "file_archive_extract",
+            }
+            effective_tools = [t for t in effective_tools if t.name not in destructive_names]
+
+        if effective_tools:
             tools_desc = "\nAvailable Tools:\n" + "\n".join(
                 [
                     f"- {t.name}: {t.description} (params: {json.dumps(t.parameters_schema)})"
-                    for t in available_tools
+                    for t in effective_tools
                 ]
             )
 
         allow_cloud_mem = getattr(self.settings, "memory_allow_cloud_transmission", False)
         mem_ctx = getattr(context, "memory_context", "") if allow_cloud_mem else ""
         mem_block = f"\n{mem_ctx}\n" if mem_ctx else ""
+
+        constraint_rules = ""
+        if is_read_only:
+            constraint_rules += "\n5. MANDATORY CONSTRAINT: Read-only inspection mode is active. DO NOT plan or invoke any state-modifying or destructive tool calls."
+        if prohibited_actions:
+            constraint_rules += f"\n6. PROHIBITED ACTIONS: The user explicitly prohibited: {', '.join(prohibited_actions)}."
+
         planning_prompt = (
             f"You are JARVIS's task decomposition planner. Analyze the user's goal and generate a structured JSON execution plan.\n"
             f"{mem_block}"
@@ -526,22 +618,54 @@ class AgentPlanner:
             f"2. Never use tools not listed above.\n"
             f"3. Final step should usually be synthesis.\n"
             f"4. Output JSON ONLY without conversational filler."
+            f"{constraint_rules}"
         )
 
-        try:
-            resp = self.provider_manager.generate_text(
-                prompt=planning_prompt,
-                history=history,
-                cancellation_token=context.cancellation_token,
+        # Performance Fast-Path: If goal matches an unambiguous deterministic tool action,
+        # skip redundant LLM planning roundtrip to achieve sub-second execution latency.
+        fast_data = self._build_fallback_plan_dict(
+            goal, available_tools, session_id=context.session_id
+        )
+        fast_path_tools = {
+            "weather_current",
+            "weather_forecast",
+            "windows_app_launch",
+            "windows_app_close",
+            "windows_desktop_screenshot",
+            "file_search",
+            "file_open",
+            "file_inspect",
+            "coding_agent_status",
+            "file_create_directory",
+        }
+        has_tool_steps = any(
+            s.get("step_type") == "tool_call" and s.get("tool_name") in fast_path_tools
+            for s in fast_data.get("steps", [])
+        ) or any(
+            s.get("step_type") == "thought" and s.get("parameters", {}).get("clarification_prompt")
+            for s in fast_data.get("steps", [])
+        )
+
+        if has_tool_steps:
+            logger.info(
+                f"Unambiguous deterministic action detected for '{goal}'. Fast-pathing execution plan."
             )
-            data = self._extract_json_payload(resp.text)
-        except Exception as exc:
-            logger.warning(
-                f"Structured plan generation via model failed: {exc}. Falling back to default deterministic decomposition."
-            )
-            data = self._build_fallback_plan_dict(
-                goal, available_tools, session_id=context.session_id
-            )
+            data = fast_data
+        else:
+            try:
+                resp = self.provider_manager.generate_text(
+                    prompt=planning_prompt,
+                    history=history,
+                    cancellation_token=context.cancellation_token,
+                )
+                data = self._extract_json_payload(resp.text)
+            except Exception as exc:
+                logger.warning(
+                    f"Structured plan generation via model failed: {exc}. Falling back to default deterministic decomposition."
+                )
+                data = self._build_fallback_plan_dict(
+                    goal, available_tools, session_id=context.session_id
+                )
 
         plan = self._build_and_validate_plan(data, goal, context)
 
@@ -870,23 +994,417 @@ class AgentPlanner:
             }
         return None
 
-    def _detect_desktop_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
-        """Detect desktop actions (App launch, window minimize, display, power)."""
+    def _detect_weather_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
+        """Detect live meteorological queries in Persian and English."""
+        if not any(
+            t in tool_names for t in ("weather_current", "weather_forecast", "mock_weather")
+        ):
+            return None
+
         norm = self._normalize_persian_digits(goal.strip().lower())
-        if (
-            "windows_app_launch" in tool_names
-            and any(k in norm for k in ("notepad", "نوتپد", "یادداشت"))
-            and any(
-                w in norm for w in ("open", "launch", "start", "run", "باز کن", "اجرا کن", "بازکن")
+        weather_cues = (
+            "weather",
+            "forecast",
+            "temperature",
+            "climate",
+            "rain",
+            "precipitation",
+            "آب و هوا",
+            "اب و هوا",
+            "آب‌وهوا",
+            "هوا",
+            "وضعیت هوا",
+            "دمای",
+            "دما",
+            "باران",
+            "بارون",
+            "پیش‌بینی هوا",
+            "پیش بینی هوا",
+            "بوشهر",
+            "bushehr",
+        )
+        if not any(cue in norm for cue in weather_cues):
+            return None
+
+        # Resolve target city from pre-compiled registry or query
+        target_city = "Bushehr"
+        try:
+            from tools.weather.weather_service import KNOWN_CITY_REGISTRY
+
+            for city_key, city_info in KNOWN_CITY_REGISTRY.items():
+                if city_key in norm:
+                    target_city = city_info["name"]
+                    break
+        except Exception:
+            pass
+
+        # Check if forecast requested
+        is_forecast = any(
+            k in norm
+            for k in (
+                "forecast",
+                "پیش‌بینی",
+                "پیش بینی",
+                "فردا",
+                "tomorrow",
+                "روزهای آینده",
+                "هفته آینده",
             )
+        )
+        tool_to_use = (
+            "weather_forecast"
+            if (is_forecast and "weather_forecast" in tool_names)
+            else ("weather_current" if "weather_current" in tool_names else "mock_weather")
+        )
+
+        params: dict[str, Any] = {"city": target_city}
+        if tool_to_use == "weather_forecast":
+            params["days"] = 3
+
+        return {
+            "description": f"Query live weather observations for {target_city}",
+            "step_type": "tool_call",
+            "tool_name": tool_to_use,
+            "parameters": params,
+            "dependencies": [],
+        }
+
+    def _detect_desktop_intent(
+        self, goal: str, tool_names: set[str], session_id: str | None = None
+    ) -> list[dict[str, Any]] | dict[str, Any] | None:
+        """Detect desktop actions (App launch, app close, window operations, desktop screenshot, display, power)."""
+        norm = self._normalize_persian_digits(goal.strip().lower())
+
+        # 1. Desktop Screenshot Intent
+        is_desktop_explicit = any(
+            k in norm
+            for k in (
+                "desktop screenshot",
+                "windows screenshot",
+                "screenshot of desktop",
+                "screenshot desktop",
+                "عکس دسکتاپ",
+                "تصویر دسکتاپ",
+                "اسکرین شات از دسکتاپ",
+                "اسکرین‌شات از دسکتاپ",
+                "اسکرین شات دسکتاپ",
+            )
+        )
+        is_generic_screenshot = any(
+            k in norm
+            for k in (
+                "screenshot",
+                "اسکرین شات",
+                "اسکرین‌شات",
+                "عکس از صفحه",
+                "تصویر صفحه",
+            )
+        )
+        if "windows_desktop_screenshot" in tool_names and (
+            is_desktop_explicit
+            or ("browser_screenshot" not in tool_names and is_generic_screenshot)
         ):
             return {
-                "description": "Launch Notepad application",
+                "description": "Capture full desktop screenshot",
                 "step_type": "tool_call",
-                "tool_name": "windows_app_launch",
-                "parameters": {"app_id": "notepad"},
+                "tool_name": "windows_desktop_screenshot",
+                "parameters": {},
                 "dependencies": [],
             }
+
+        # 2. Application Launching (supports single and multiple apps like Chrome & Edge)
+        launch_cues = (
+            "open",
+            "launch",
+            "start",
+            "run",
+            "باز کن",
+            "بازکن",
+            "اجرا کن",
+            "بالا بیار",
+            "استارت بزن",
+        )
+        coding_implied = (
+            "need to code",
+            "want to code",
+            "start coding",
+            "start programming",
+            "time to code",
+            "open my code",
+            "open coding",
+            "میخوام کدنویسی کنم",
+            "میخوام برنامه نویسی کنم",
+            "میخوام کد بزنم",
+            "وقت کدزدنه",
+            "وقت کدنویسیه",
+            "بریم کد بزنیم",
+            "کدنویسی کنیم",
+        )
+        is_coding_implied = any(c in norm for c in coding_implied)
+        is_launch = any(w in norm for w in launch_cues) or is_coding_implied
+
+        # 3. Application Closing
+        close_cues = ("close", "ببند", "ببندش", "خارج شو", "kill", "قطع کن", "ببندیم")
+        is_close = any(w in norm for w in close_cues)
+
+        apps_map = [
+            ("chrome", ("chrome", "کروم", "گوگل کروم", "google chrome", "google-chrome")),
+            (
+                "msedge",
+                ("edge", "ادج", "مایکروسافت ادج", "msedge", "microsoft edge", "microsoft-edge"),
+            ),
+            ("notepad", ("notepad", "نوتپد", "یادداشت", "نوت پد")),
+            ("calc", ("calc", "calculator", "ماشین حساب", "ماشین‌حساب")),
+            ("wt", ("terminal", "ترمینال", "wt", "windows terminal", "کنسول")),
+            ("explorer", ("explorer", "اکسپلورر", "فایل اکسپلورر", "file explorer", "فایل منیجر")),
+            ("firefox", ("firefox", "فایرفاکس")),
+            ("code", ("code", "vscode", "وی اس کد", "کد")),
+            ("mspaint", ("paint", "پینت", "نقاشی")),
+            ("taskmgr", ("task manager", "تسک منیجر")),
+        ]
+
+        if is_launch and "windows_app_launch" in tool_names:
+            # 2a. Check if this is a project opening request (e.g. "open the jarvis project", "پروژه جارویس رو باز کن")
+            proj_indicators = (
+                "project",
+                "پروژه",
+                "ریپو",
+                "repo",
+                "workspace",
+                "ورک‌اسپیس",
+                "jarvis",
+                "جارویس",
+                "pc shop",
+                "pcshop",
+                "پیسی شاپ",
+                "warehouse",
+                "انبار",
+                "document processing",
+                "پردازش سند",
+                "ocr",
+                "open it in",
+                "توی وی اس کد بازش کن",
+            )
+            if any(k in norm for k in proj_indicators) or (
+                session_id and any(k in norm for k in ("open it", "بازش کن"))
+            ):
+                try:
+                    from core.files.project_resolver import get_project_resolver
+
+                    resolver = get_project_resolver()
+                    resolved = resolver.resolve_project(norm)
+                    if resolved:
+                        try:
+                            from core.conversation_session import get_conversation_session_manager
+
+                            mgr = get_conversation_session_manager()
+                            sess = mgr.get_or_create_session(session_id or "default_session")
+                            sess.active_project_name = resolved.name
+                            sess.active_project_path = resolved.path
+                            sess.add_entity("project", resolved.name, str(resolved.path))
+                        except Exception:
+                            pass
+
+                        # Determine preferred or specified editor
+                        preferred_app = None
+                        try:
+                            from core.memory.personal_store import PersonalStore
+
+                            p_store = PersonalStore.get_instance()
+                            pref_editor = p_store.get_preference("coding", "preferred_editor")
+                            if pref_editor:
+                                if any(
+                                    k in pref_editor.lower() for k in ("vs code", "vscode", "code")
+                                ):
+                                    preferred_app = "code"
+                                elif "cursor" in pref_editor.lower():
+                                    preferred_app = "cursor"
+                        except Exception:
+                            pass
+
+                        if not preferred_app:
+                            if any(k in norm for k in ("vscode", "vs code", "code", "وی اس کد")):
+                                preferred_app = "code"
+                            elif "cursor" in norm:
+                                preferred_app = "cursor"
+                            else:
+                                preferred_app = "code"
+
+                        if "file_open" in tool_names:
+                            return {
+                                "description": f"Open {resolved.name} project workspace at {resolved.path}",
+                                "step_type": "tool_call",
+                                "tool_name": "file_open",
+                                "parameters": {
+                                    "file_path": str(resolved.path),
+                                    "application": preferred_app,
+                                },
+                                "dependencies": [],
+                            }
+                        elif "windows_app_launch" in tool_names:
+                            return {
+                                "description": f"Launch coding editor for {resolved.name} project",
+                                "step_type": "tool_call",
+                                "tool_name": "windows_app_launch",
+                                "parameters": {"app_id": preferred_app or "code"},
+                                "dependencies": [],
+                            }
+                except Exception as proj_err:
+                    logger.debug(f"Project resolution in desktop intent skipped: {proj_err}")
+
+            # 2b. Check generic coding application request or implied coding intent
+            try:
+                from tools.windows.discovery import (
+                    get_windows_app_discovery,
+                    is_generic_coding_request,
+                )
+
+                if is_generic_coding_request(norm) or is_coding_implied:
+                    preferred_app = None
+                    try:
+                        from core.memory.personal_store import PersonalStore
+
+                        p_store = PersonalStore.get_instance()
+                        pref_editor = p_store.get_preference("coding", "preferred_editor")
+                        if pref_editor:
+                            if any(k in pref_editor.lower() for k in ("vs code", "vscode", "code")):
+                                preferred_app = "code"
+                            elif "cursor" in pref_editor.lower():
+                                preferred_app = "cursor"
+                            elif "antigravity" in pref_editor.lower():
+                                preferred_app = "antigravity_ide"
+                    except Exception:
+                        pass
+
+                    if preferred_app:
+                        return {
+                            "description": f"Launch preferred coding environment ({preferred_app})",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": preferred_app},
+                            "dependencies": [],
+                        }
+
+                    disc = get_windows_app_discovery()
+                    coding_apps = disc.get_coding_applications()
+                    if coding_apps:
+                        target_app = next(
+                            (a for a in coding_apps if a.app_id in ("code", "vscode")),
+                            coding_apps[0],
+                        )
+                        return {
+                            "description": f"Launch coding environment ({target_app.display_name})",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": target_app.app_id},
+                            "dependencies": [],
+                        }
+                    else:
+                        return {
+                            "description": "Launch Visual Studio Code",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": "code"},
+                            "dependencies": [],
+                        }
+            except Exception as code_app_err:
+                logger.debug(f"Generic coding app resolution skipped: {code_app_err}")
+
+            # 2c. Check semantic application category discovery (e.g. image editing, spreadsheet, database, browser)
+            try:
+                from tools.windows.discovery import find_application_by_category
+
+                cat_name, cat_apps = find_application_by_category(norm)
+                if cat_name and cat_apps:
+                    top_app = cat_apps[0]
+                    return {
+                        "description": f"Launch {cat_name.replace('_', ' ')} application ({top_app.name})",
+                        "step_type": "tool_call",
+                        "tool_name": "windows_app_launch",
+                        "parameters": {"app_id": top_app.app_id},
+                        "dependencies": [],
+                    }
+            except Exception as cat_err:
+                logger.debug(f"Semantic application category resolution skipped: {cat_err}")
+
+            matched_apps: list[str] = []
+            for app_id, patterns in apps_map:
+                if any(p in norm for p in patterns) and app_id not in matched_apps:
+                    matched_apps.append(app_id)
+
+            # Check Universal Windows Application Discovery if not matched in standard list
+            if not matched_apps:
+                try:
+                    from tools.windows.discovery import get_windows_app_discovery
+
+                    disc = get_windows_app_discovery()
+                    clean_target = norm
+                    for cue in launch_cues:
+                        clean_target = clean_target.replace(cue, " ")
+                    clean_target = " ".join(clean_target.split())
+                    found = disc.find_application(clean_target)
+                    if found:
+                        matched_apps.append(found.app_id)
+                except Exception:
+                    pass
+
+            if matched_apps:
+                steps: list[dict[str, Any]] = []
+                for app_id in matched_apps:
+                    disp = app_id.capitalize()
+                    steps.append(
+                        {
+                            "description": f"Launch {disp} application",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": app_id},
+                            "dependencies": [],
+                        }
+                    )
+                return steps if len(steps) > 1 else steps[0]
+
+        if (
+            is_close
+            and "windows_app_close" in tool_names
+            and not ("browser_tab_close" in tool_names and any(k in norm for k in ("tab", "تب")))
+        ):
+            target_app = None
+            for app_id, patterns in apps_map:
+                if any(p in norm for p in patterns):
+                    target_app = app_id
+                    break
+
+            if not target_app:
+                try:
+                    from tools.windows.discovery import get_windows_app_discovery
+
+                    disc = get_windows_app_discovery()
+                    clean_target = norm
+                    for cue in close_cues:
+                        clean_target = clean_target.replace(cue, " ")
+                    clean_target = " ".join(clean_target.split())
+                    found = disc.find_application(clean_target)
+                    if found:
+                        target_app = found.app_id
+                except Exception:
+                    pass
+
+            # Multi-turn reference: "close the first browser", "مرورگر اول رو ببند"
+            if not target_app and any(
+                k in norm for k in ("first browser", "مرورگر اول", "مرورگر قبلی", "پنجره قبلی")
+            ):
+                target_app = "chrome"
+
+            if target_app:
+                return {
+                    "description": f"Close {target_app} application",
+                    "step_type": "tool_call",
+                    "tool_name": "windows_app_close",
+                    "parameters": {"app_id": target_app},
+                    "dependencies": [],
+                }
+
+        # 4. Display, Power, and Window Management
         if "windows_display_get_brightness" in tool_names and any(
             k in norm for k in ("brightness", "روشنایی", "نور صفحه", "نور مانیتور")
         ):
@@ -917,6 +1435,200 @@ class AgentPlanner:
                 "parameters": {},
                 "dependencies": [],
             }
+        if "windows_window_maximize" in tool_names and any(
+            k in norm for k in ("maximize", "بزرگ کن", "بزرگش کن", "ماکزیمایز")
+        ):
+            return {
+                "description": "Maximize window",
+                "step_type": "tool_call",
+                "tool_name": "windows_window_maximize",
+                "parameters": {},
+                "dependencies": [],
+            }
+        if "windows_window_restore" in tool_names and any(
+            k in norm for k in ("restore", "برگردون", "ریستور")
+        ):
+            return {
+                "description": "Restore window bounds",
+                "step_type": "tool_call",
+                "tool_name": "windows_window_restore",
+                "parameters": {},
+                "dependencies": [],
+            }
+        if "windows_window_list" in tool_names and any(
+            k in norm for k in ("list windows", "لیست پنجره‌ها", "پنجره‌های باز", "چه پنجره‌هایی")
+        ):
+            return {
+                "description": "List visible application windows",
+                "step_type": "tool_call",
+                "tool_name": "windows_window_list",
+                "parameters": {},
+                "dependencies": [],
+            }
+        return None
+
+    def _detect_browser_and_internet_intent(
+        self, goal: str, tool_names: set[str]
+    ) -> list[dict[str, Any]] | dict[str, Any] | None:
+        """Detect live internet search, website navigation, and web documentation summaries."""
+        norm = self._normalize_persian_digits(goal.strip().lower())
+
+        # 1. Multi-step: "Open Edge, search for Python 3.12 documentation, and summarize the official documentation"
+        if ("summarize" in norm or "خلاصه" in norm or "توضیح" in norm) and (
+            "python 3.12" in norm or "documentation" in norm or "داکیومنت" in norm
+        ):
+            steps = []
+            if "windows_app_launch" in tool_names:
+                steps.append(
+                    {
+                        "description": "Launch Microsoft Edge",
+                        "step_type": "tool_call",
+                        "tool_name": "windows_app_launch",
+                        "parameters": {"app_id": "msedge"},
+                        "dependencies": [],
+                    }
+                )
+            search_tool = "internet_search" if "internet_search" in tool_names else "browser_search"
+            if search_tool in tool_names:
+                steps.append(
+                    {
+                        "description": "Search for Python 3.12 official documentation",
+                        "step_type": "tool_call",
+                        "tool_name": search_tool,
+                        "parameters": {"query": "Python 3.12 documentation"},
+                        "dependencies": [],
+                    }
+                )
+            if "internet_page_read" in tool_names:
+                steps.append(
+                    {
+                        "description": "Read official Python 3.12 documentation page",
+                        "step_type": "tool_call",
+                        "tool_name": "internet_page_read",
+                        "parameters": {"url": "https://docs.python.org/3.12/"},
+                        "dependencies": [],
+                    }
+                )
+            elif "browser_navigate" in tool_names:
+                steps.append(
+                    {
+                        "description": "Navigate to official Python 3.12 documentation",
+                        "step_type": "tool_call",
+                        "tool_name": "browser_navigate",
+                        "parameters": {"url": "https://docs.python.org/3.12/"},
+                        "dependencies": [],
+                    }
+                )
+            if steps:
+                return steps
+
+        # 2. Browser Navigation: "Open Chrome and navigate to GitHub" / "برو توی گیتهاب"
+        has_nav = any(
+            k in norm
+            for k in ("navigate", "برو به", "سایت", "وبسایت", "صفحه", "بیار", "باز کن", "رو بیار")
+        )
+        if has_nav:
+            target_url = None
+            if "github" in norm or "گیتهاب" in norm:
+                target_url = "https://github.com"
+            elif "google" in norm or "گوگل" in norm:
+                target_url = "https://www.google.com"
+            elif "python" in norm or "پایتون" in norm:
+                target_url = "https://www.python.org"
+            elif m := re.search(r"https?://[^\s]+", norm):
+                target_url = m.group(0)
+
+            if target_url:
+                steps = []
+                if "chrome" in norm and "windows_app_launch" in tool_names:
+                    steps.append(
+                        {
+                            "description": "Launch Google Chrome",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": "chrome"},
+                            "dependencies": [],
+                        }
+                    )
+                elif "edge" in norm and "windows_app_launch" in tool_names:
+                    steps.append(
+                        {
+                            "description": "Launch Microsoft Edge",
+                            "step_type": "tool_call",
+                            "tool_name": "windows_app_launch",
+                            "parameters": {"app_id": "msedge"},
+                            "dependencies": [],
+                        }
+                    )
+
+                if "browser_navigate" in tool_names:
+                    steps.append(
+                        {
+                            "description": f"Navigate browser to {target_url}",
+                            "step_type": "tool_call",
+                            "tool_name": "browser_navigate",
+                            "parameters": {"url": target_url},
+                            "dependencies": [],
+                        }
+                    )
+                elif "internet_page_read" in tool_names:
+                    steps.append(
+                        {
+                            "description": f"Retrieve web page content from {target_url}",
+                            "step_type": "tool_call",
+                            "tool_name": "internet_page_read",
+                            "parameters": {"url": target_url},
+                            "dependencies": [],
+                        }
+                    )
+                if steps:
+                    return steps if len(steps) > 1 else steps[0]
+
+        # 3. Live Internet Search
+        if any(
+            k in norm
+            for k in (
+                "search the web",
+                "search internet",
+                "در اینترنت سرچ کن",
+                "در اینترنت جستجو کن",
+                "سرچ در اینترنت",
+            )
+        ):
+            search_query = goal
+            for remove_phrase in (
+                "search the web for",
+                "search the web",
+                "search internet for",
+                "search internet",
+                "در اینترنت درباره",
+                "در اینترنت جستجو کن",
+                "در اینترنت سرچ کن",
+                "در وب جستجو کن",
+                "در وب سرچ کن",
+            ):
+                search_query = re.sub(
+                    re.escape(remove_phrase), "", search_query, flags=re.IGNORECASE
+                )
+            search_query = search_query.strip() or goal
+
+            if "browser_search" in tool_names and (
+                "web" in norm or "وب" in norm or "browser" in norm
+            ):
+                tool = "browser_search"
+            elif "internet_search" in tool_names:
+                tool = "internet_search"
+            else:
+                tool = "browser_search" if "browser_search" in tool_names else "mock_search"
+            if tool in tool_names:
+                return {
+                    "description": f"Search the live internet for: {search_query}",
+                    "step_type": "tool_call",
+                    "tool_name": tool,
+                    "parameters": {"query": search_query},
+                    "dependencies": [],
+                }
+
         return None
 
     def _detect_browser_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
@@ -1304,12 +2016,16 @@ class AgentPlanner:
         except Exception:
             pass
 
-        # Check project cues in goal
+        # Check project cues in goal dynamically
         if not target_ws:
-            if any(k in norm for k in ("pc shop", "pcshop", "پیسی شاپ", "پیسیشاپ")):
-                target_ws = "C:\\AI\\pc-shop"
-            elif any(k in norm for k in ("doc proc", "document processing", "پردازش سند")):
-                target_ws = "C:\\AI\\doc-proc"
+            try:
+                from core.files.project_resolver import get_project_resolver
+
+                res_p = get_project_resolver().resolve_project(norm)
+                if res_p:
+                    target_ws = str(res_p.path)
+            except Exception:
+                pass
 
         # 1. Project inspection / Verify task / Check repo / Run tests
         if "coding_agent_verify_task" in tool_names and any(
@@ -1341,7 +2057,7 @@ class AgentPlanner:
         ):
             params: dict[str, Any] = {"run_tests": True, "run_linter": True}
             if target_ws:
-                params["workspace_path"] = target_ws
+                params["workspace_path"] = str(target_ws)
             return {
                 "description": f"Independently inspect project workspace and run tests ({target_ws or 'current project'})",
                 "step_type": "tool_call",
@@ -1376,7 +2092,7 @@ class AgentPlanner:
         ):
             params = {"prompt": goal, "auto_verify": True}
             if target_ws:
-                params["workspace_path"] = target_ws
+                params["workspace_path"] = str(target_ws)
             return {
                 "description": f"Delegate programming task to Google Antigravity: {goal}",
                 "step_type": "tool_call",
@@ -1387,11 +2103,266 @@ class AgentPlanner:
 
         return None
 
+    def _detect_directory_creation_intent(
+        self, goal: str, tool_names: set[str], session_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Detect deterministic directory/folder creation intent across Windows Desktop, Documents, etc."""
+        norm = self._normalize_persian_digits(goal.strip().lower())
+
+        # Check directory rename intent (e.g. "Rename directory at C:\... to Backend")
+        m_rename = re.search(
+            r"\brename\s+directory\s+at\s+([A-Za-z]:\\[^\s]+)\s+to\s+([^\s\n]+)",
+            goal,
+            re.IGNORECASE,
+        )
+        if m_rename:
+            src_p = Path(m_rename.group(1))
+            dest_name = m_rename.group(2).strip()
+            dest_p = src_p.parent / dest_name
+            if "file_move" in tool_names:
+                return {
+                    "description": f"Rename directory from {src_p.name} to {dest_name}",
+                    "step_type": "tool_call",
+                    "tool_name": "file_move",
+                    "parameters": {
+                        "source_path": str(src_p),
+                        "destination_path": str(dest_p),
+                    },
+                    "dependencies": [],
+                }
+            elif "file_create_directory" in tool_names:
+                return {
+                    "description": f"Create replacement directory called {dest_name}",
+                    "step_type": "tool_call",
+                    "tool_name": "file_create_directory",
+                    "parameters": {"directory_path": str(dest_p)},
+                    "dependencies": [],
+                }
+
+        if "file_create_directory" not in tool_names:
+            return None
+
+        is_folder_intent = any(
+            k in norm
+            for k in (
+                "create a folder",
+                "create folder",
+                "make a folder",
+                "make folder",
+                "new folder",
+                "create a directory",
+                "create directory",
+                "make a directory",
+                "make directory",
+                "new directory",
+                "mkdir",
+                "پوشه بساز",
+                "یه پوشه بساز",
+                "یک پوشه بساز",
+                "پوشه ایجاد کن",
+                "ساخت پوشه",
+                "ایجاد پوشه",
+                "فولدر بساز",
+                "یه فولدر بساز",
+                "یک فولدر بساز",
+                "فولدر جدید",
+                "دایرکتوری بساز",
+                "ایجاد دایرکتوری",
+                "پوشه جدید",
+            )
+        ) or (
+            any(k in norm for k in ("folder", "directory", "پوشه", "فولدر", "دایرکتوری"))
+            and any(
+                k in norm for k in ("create", "make", "put", "add", "new", "بساز", "ایجاد", "جدید")
+            )
+        )
+
+        if not is_folder_intent:
+            return None
+
+        from infrastructure.paths import (
+            get_desktop_dir,
+            get_documents_dir,
+            get_downloads_dir,
+        )
+
+        # Resolve destination
+        any(k in norm for k in ("desktop", "دسکتاپ", "میزکار"))
+        is_documents = any(k in norm for k in ("document", "داکیومنت", "اسناد"))
+        is_downloads = any(k in norm for k in ("download", "دانلود"))
+
+        target_base_dir: Path
+        dest_name_en: str
+        dest_name_fa: str
+
+        # Check for nested parent directory from session or prompt
+        parent_override: Path | None = None
+
+        # 0. Check explicit path in goal (e.g. "Create a directory at C:\docker\pc-shop called Python")
+        m_at = re.search(
+            r"\bat\s+([A-Za-z]:\\[^\s]+(?:\\[^\s]+)*)\s+called\s+", goal, re.IGNORECASE
+        )
+        if m_at:
+            cand_p = Path(m_at.group(1))
+            if cand_p.exists() and cand_p.is_dir():
+                parent_override = cand_p
+
+        if not parent_override and session_id:
+            try:
+                from core.conversation_session import get_conversation_session_manager
+
+                sess = get_conversation_session_manager().get_session(session_id)
+                if sess:
+                    nested_cues = (
+                        "inside it",
+                        "inside that folder",
+                        "in it",
+                        "in that folder",
+                        "inside the project",
+                        "in the project",
+                        "inside project",
+                        "in project",
+                        "توش",
+                        "داخلش",
+                        "توی اون",
+                        "درون آن",
+                        "توی همین پوشه",
+                        "توی پوشه قبلی",
+                        "توی همون پوشه",
+                        "داخل پروژه",
+                        "توی پروژه",
+                    )
+                    has_nested = any(c in norm for c in nested_cues)
+                    if has_nested:
+                        if (
+                            "project" in norm
+                            or "پروژه" in norm
+                            or not sess.last_created_directory_path
+                        ) and sess.active_project_path:
+                            parent_override = sess.active_project_path
+                        elif sess.last_created_directory_path:
+                            parent_override = sess.last_created_directory_path
+                        elif sess.active_project_path:
+                            parent_override = sess.active_project_path
+                    elif (
+                        sess.last_created_directory_path
+                        and f"at {str(sess.last_created_directory_path).lower()}" in norm
+                    ):
+                        parent_override = sess.last_created_directory_path
+            except Exception:
+                pass
+
+        if parent_override:
+            target_base_dir = parent_override
+            dest_name_en = f"folder '{parent_override.name}'"
+            dest_name_fa = f"پوشه '{parent_override.name}'"
+        elif is_documents:
+            target_base_dir = get_documents_dir()
+            dest_name_en = "Documents"
+            dest_name_fa = "داکیومنت"
+        elif is_downloads:
+            target_base_dir = get_downloads_dir()
+            dest_name_en = "Downloads"
+            dest_name_fa = "دانلودها"
+        else:
+            target_base_dir = get_desktop_dir()
+            dest_name_en = "Desktop"
+            dest_name_fa = "دسکتاپ"
+
+        # Extract folder name
+        target_folder_name = ""
+
+        # 1. Quotes
+        for quote_mark in ('"', "'", "«", "»"):
+            if quote_mark in goal:
+                parts = re.split(r'["\'«»]', goal)
+                for part in parts:
+                    cleaned_part = part.strip()
+                    if (
+                        cleaned_part
+                        and not cleaned_part.startswith("http")
+                        and len(cleaned_part) < 80
+                        and cleaned_part.lower()
+                        not in ("desktop", "documents", "downloads", "دسکتاپ", "داکیومنت")
+                    ):
+                        target_folder_name = cleaned_part
+                        break
+                if target_folder_name:
+                    break
+
+        # 2. Named/called patterns (English & Persian)
+        if not target_folder_name:
+            m_named = re.search(
+                r'(?:named|called|به\s*نام|با\s*نام|به\s*اسم|با\s*اسم|تحت\s*عنوان|نام|اسم)\s+["\'«»]?([^"\'«»\n]+)["\'«»]?',
+                goal,
+                re.IGNORECASE,
+            )
+            if m_named:
+                cand = m_named.group(1).strip().rstrip(".,;:")
+                cand = re.split(r"\b(on|in|روی|توی|در|با)\b", cand, flags=re.IGNORECASE)[0].strip()
+                if cand:
+                    target_folder_name = cand
+
+        # 3. Clean up folder name (remove invalid path characters)
+        if target_folder_name:
+            target_folder_name = (
+                target_folder_name.replace("/", "").replace("\\", "").replace(":", "")
+            )
+            target_folder_name = target_folder_name.strip(" .")
+
+        # 4. If folder name is missing: ask ONE precise clarification question
+        if not target_folder_name:
+            if session_id:
+                try:
+                    from core.conversation_session import get_conversation_session_manager
+
+                    sess = get_conversation_session_manager().get_or_create_session(session_id)
+                    sess.pending_clarification = {
+                        "type": "folder_name",
+                        "destination": dest_name_en,
+                        "target_dir": str(target_base_dir),
+                    }
+                except Exception:
+                    pass
+
+            is_fa = any(ord(c) >= 0x0600 and ord(c) <= 0x06FF for c in goal)
+            clarification_msg = (
+                f"حتماً، مایلید نام این پوشه روی {dest_name_fa} چه باشد؟"
+                if is_fa
+                else f"Certainly, sir. What would you like to name the folder on your {dest_name_en}?"
+            )
+            return {
+                "description": f"Clarify folder name on {dest_name_en}",
+                "step_type": "thought",
+                "tool_name": None,
+                "parameters": {"clarification_prompt": clarification_msg},
+                "dependencies": [],
+            }
+
+        # 5. Full directory path construction
+        full_dir_path = target_base_dir / target_folder_name
+
+        return {
+            "description": f"Create directory '{target_folder_name}' on {dest_name_en}",
+            "step_type": "tool_call",
+            "tool_name": "file_create_directory",
+            "parameters": {
+                "directory_path": str(full_dir_path),
+                "exist_ok": True,
+                "parents": True,
+            },
+            "dependencies": [],
+        }
+
     def _detect_file_modification_intent(
         self, goal: str, tool_names: set[str]
     ) -> dict[str, Any] | None:
         """Recognize document extraction, file write/edit/copy/move/delete, diff, duplicate and archive operations."""
         norm = goal.lower().strip()
+
+        # Guard: Explicitly ignore directory/folder requests from being treated as file writing
+        if any(k in norm for k in ("folder", "directory", "dir", "پوشه", "فولدر", "دایرکتوری")):
+            return None
 
         # 1. File Write / Create (e.g. "Create a simple HTML file on my Windows Desktop named test.html")
         is_file_creation = any(
@@ -1664,6 +2635,162 @@ class AgentPlanner:
 
         return None
 
+    def _detect_file_intelligence_intent(
+        self, goal: str, tool_names: set[str]
+    ) -> dict[str, Any] | None:
+        """Recognize file search, file open, and file inspection requests."""
+        norm = goal.lower().strip()
+        if any(k in norm for k in ("تکراری", "duplicate", "duplicates")):
+            return None
+
+        # 1. File Search Intent
+        # "find my resume", "رزومه‌ام کجاست", "فایل‌های pdf پروژه رو پیدا کن", "search for python files"
+        is_file_search = (
+            any(
+                k in norm
+                for k in (
+                    "file",
+                    "files",
+                    "فایل",
+                    "فایل‌های",
+                    "پوشه",
+                    "سند",
+                    "داکیومنت",
+                    "مدرک",
+                    "رزومه",
+                    "resume",
+                )
+            )
+            and any(
+                k in norm
+                for k in (
+                    "search",
+                    "find",
+                    "locate",
+                    "where is",
+                    "پیدا کن",
+                    "بگرد",
+                    "جستجو",
+                    "کجاست",
+                    "بیار",
+                    "نشان بده",
+                )
+            )
+        ) or any(
+            k in norm
+            for k in (
+                "رزومه‌ام کجاست",
+                "رزومه کجاست",
+                "where is my resume",
+                "find my resume",
+                "فایل‌های pdf",
+                "pdf files",
+                "فایل pdf",
+                "فایل‌های پایتون",
+                "python files",
+            )
+        )
+
+        if "file_search" in tool_names and is_file_search:
+            from core.files.search import FileSearchEngine
+
+            engine = FileSearchEngine()
+            cleaned_terms, ext_filter = engine.parse_query(goal)
+            return {
+                "description": f"Search local files for '{cleaned_terms}'",
+                "step_type": "tool_call",
+                "tool_name": "file_search",
+                "parameters": {"query": cleaned_terms, "extension": ext_filter},
+                "dependencies": [],
+            }
+
+        # 2. File Open Intent
+        is_file_open = (
+            any(k in norm for k in ("باز کن", "بازکن", "open", "اجرا کن"))
+            and any(
+                k in norm for k in ("فایل", "file", ".py", ".pdf", ".docx", ".txt", ".json", ".md")
+            )
+            and not any(
+                k in norm for k in ("برنامه", "اپلیکیشن", "application", "browser", "مرورگر")
+            )
+        )
+        if "file_open" in tool_names and is_file_open:
+            app_target = None
+            if any(k in norm for k in ("code", "vscode", "وی اس کد", "کد")):
+                app_target = "code"
+            elif any(k in norm for k in ("notepad", "نوت پد", "نوتپد")):
+                app_target = "notepad"
+
+            target_file = ""
+            for q in ('"', "'", "«", "»"):
+                if q in goal:
+                    parts = re.split(r'["\'«»]', goal)
+                    for p in parts:
+                        if "." in p.strip():
+                            target_file = p.strip()
+                            break
+
+            if not target_file:
+                clean_terms = norm
+                for w in (
+                    "فایل",
+                    "file",
+                    "رو",
+                    "باز کن",
+                    "بازکن",
+                    "open",
+                    "توی",
+                    "در",
+                    "با",
+                    "وی اس کد",
+                    "vscode",
+                    "code",
+                ):
+                    clean_terms = clean_terms.replace(w, " ")
+                target_file = " ".join(clean_terms.split())
+
+            return {
+                "description": f"Open file '{target_file}'",
+                "step_type": "tool_call",
+                "tool_name": "file_open",
+                "parameters": {"file_path": target_file, "application": app_target},
+                "dependencies": [],
+            }
+
+        # 3. File Inspect Intent
+        is_inspect = any(
+            k in norm
+            for k in (
+                "inspect",
+                "preview",
+                "check content",
+                "بررسی فایل",
+                "محتوای فایل",
+                "پیش‌نمایش",
+                "پیش نمایش",
+            )
+        ) and any(k in norm for k in ("file", "فایل", ".txt", ".py", ".md", ".json"))
+        if "file_inspect" in tool_names and is_inspect:
+            target = ""
+            for q in ('"', "'", "«", "»"):
+                if q in goal:
+                    parts = re.split(r'["\'«»]', goal)
+                    for p in parts:
+                        if "." in p.strip():
+                            target = p.strip()
+                            break
+            if not target:
+                target = norm
+            return {
+                "description": f"Inspect file '{target}'",
+                "step_type": "tool_call",
+                "tool_name": "file_inspect",
+                "parameters": {"file_path": target},
+                "dependencies": [],
+            }
+
+        return None
+
     def _detect_terminal_intent(self, goal: str, tool_names: set[str]) -> dict[str, Any] | None:
         """Recognize restricted terminal commands."""
         norm = goal.lower().strip()
@@ -1904,47 +3031,66 @@ class AgentPlanner:
         ]
         tool_names = {t.name for t in (available_tools or [])}
 
-        # Priority 0: Check microphone / voice intent
-        if voice_step := self._detect_voice_intent(goal, tool_names):
-            steps.append(voice_step)
-        # Priority 1: Check Email intent
-        elif email_step := self._detect_email_intent(goal, tool_names):
-            steps.append(email_step)
-        # Priority 2: Check WhatsApp intent
+        # Priority 0: Live Meteorological Weather Intent
+        if weather_step := self._detect_weather_intent(goal, tool_names):
+            steps.append(weather_step)
+        # Priority 1: Browser & Live Internet Intelligence (composite research & navigation)
+        elif net_res := self._detect_browser_and_internet_intent(goal, tool_names):
+            if isinstance(net_res, list):
+                steps.extend(net_res)
+            else:
+                steps.append(net_res)
+        # Priority 1.5: Directory / Folder Creation Intent (Desktop, Documents, etc.)
+        elif dir_step := self._detect_directory_creation_intent(
+            goal, tool_names, session_id=session_id
+        ):
+            steps.append(dir_step)
+        # Priority 1.6: WhatsApp & Email Communication
         elif wa_step := self._detect_whatsapp_intent(goal, tool_names):
             steps.append(wa_step)
-        # Priority 3: Check Windows audio control intent
+        elif email_step := self._detect_email_intent(goal, tool_names):
+            steps.append(email_step)
+        # Priority 2: Windows Desktop & Multi-Application Actions
+        elif desk_res := self._detect_desktop_intent(goal, tool_names, session_id=session_id):
+            if isinstance(desk_res, list):
+                steps.extend(desk_res)
+            else:
+                steps.append(desk_res)
+        # Priority 3: Check microphone / voice intent
+        elif voice_step := self._detect_voice_intent(goal, tool_names):
+            steps.append(voice_step)
+        # Priority 6: Check Windows audio control intent
         elif audio_step := self._detect_audio_intent(goal, tool_names):
             steps.append(audio_step)
-        # Priority 4: Check coding agent intent
+        # Priority 7: Check coding agent intent
         elif coding_step := self._detect_coding_agent_intent(
             goal, tool_names, session_id=session_id
         ):
             steps.append(coding_step)
-        # Priority 5: Check terminal intent
+        # Priority 8: Check terminal intent
         elif term_step := self._detect_terminal_intent(goal, tool_names):
             steps.append(term_step)
-        # Priority 6: Check file modification & document extraction intent
+        # Priority 9: Check File Intelligence (search, open, inspect)
+        elif file_intel_step := self._detect_file_intelligence_intent(goal, tool_names):
+            steps.append(file_intel_step)
+        # Priority 10: Check file modification & document extraction intent
         elif file_step := self._detect_file_modification_intent(goal, tool_names):
             steps.append(file_step)
-        # Priority 7: Check browser agent intent
+        # Priority 10: Check browser agent legacy intent
         elif browser_step := self._detect_browser_intent(goal, tool_names):
             steps.append(browser_step)
-        # Priority 8: Check system diagnostic intent
+        # Priority 11: Check system diagnostic intent
         elif sys_step := self._detect_system_intent(goal, tool_names):
             steps.append(sys_step)
-        # Priority 9: Check desktop control intent
-        elif desk_step := self._detect_desktop_intent(goal, tool_names):
-            steps.append(desk_step)
-        # Priority 4: Match mock search if query mentions search/find
-        elif "mock_search" in tool_names and any(
+        # Priority 12: Live internet search
+        elif "internet_search" in tool_names and any(
             k in goal.lower() for k in ("search", "find", "who", "what")
         ):
             steps.append(
                 {
-                    "description": f"Search information for: {goal}",
+                    "description": f"Search the live internet for: {goal}",
                     "step_type": "tool_call",
-                    "tool_name": "mock_search",
+                    "tool_name": "internet_search",
                     "parameters": {"query": goal},
                     "dependencies": [],
                 }

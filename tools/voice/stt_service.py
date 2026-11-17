@@ -169,19 +169,16 @@ class SpeechRecognitionService(BaseSTTService):
             )
 
         except Exception as exc:
-            logger.warning(f"Live STT failed or unavailable: {exc}. Falling back gracefully.")
-            # Fallback deterministic response for robust recovery without crashing
-            lang = "en" if language == "en" else ("fa" if language == "fa" else "fa")
-            fallback_text = "سلام جارویس" if lang == "fa" else "Hello JARVIS"
-            conf = 0.85
+            logger.warning(f"Live STT failed or unavailable: {exc}. Graceful error return.")
+            lang = language if language != "auto" else "en"
             return TranscriptResult(
-                text=fallback_text,
+                text="",
                 language=lang,
-                confidence=conf,
+                confidence=0.0,
                 is_final=True,
                 duration_seconds=duration,
-                is_ambiguous=self.analyze_ambiguity(fallback_text, conf),
-                error=f"Live STT provider recovery: {exc}",
+                is_ambiguous=False,
+                error=f"Live STT provider error: {exc}",
             )
 
 

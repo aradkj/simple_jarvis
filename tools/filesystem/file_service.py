@@ -87,6 +87,18 @@ class FileOperationResult:
     message: str
     details: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def already_exists(self) -> bool:
+        return bool(self.details.get("already_exists", False))
+
+    @property
+    def data(self) -> dict[str, Any]:
+        return self.details
+
+    @property
+    def error(self) -> str | None:
+        return None if self.success else self.message
+
 
 class FileService:
     """Core service for controlled file system operations."""
@@ -97,6 +109,125 @@ class FileService:
     def _is_reserved_windows_name(self, filename: str) -> bool:
         stem = Path(filename).stem.upper()
         return stem in WINDOWS_RESERVED_NAMES
+
+    def create_directory(
+        self,
+        target_path: str,
+        exist_ok: bool = True,
+        parents: bool = True,
+    ) -> FileOperationResult:
+        """Create a directory inside an authorized location (e.g. Desktop, Documents).
+
+        Idempotent: If directory already exists and exist_ok is True, verifies existence
+        and returns verified=True with already_exists=True, preventing infinite retry loops.
+        """
+        settings = get_settings()
+        if not settings.file_modification_enabled:
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=target_path,
+                message="File modification subsystem is disabled in configuration.",
+            )
+
+        try:
+            resolved_path = self.security.validate_and_resolve_path(
+                target_path, operation="create_directory"
+            )
+        except Exception as perm_err:
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=target_path,
+                message=f"Security validation failed: {perm_err}",
+                details={"error_category": "permission_denied"},
+            )
+
+        if self._is_reserved_windows_name(resolved_path.name):
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=str(resolved_path),
+                message=f"Access denied: '{resolved_path.name}' is a reserved Windows device name.",
+                details={"error_category": "reserved_name"},
+            )
+
+        # Check if a non-directory file already exists with this exact path
+        if resolved_path.exists() and not resolved_path.is_dir():
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=str(resolved_path),
+                message=f"A regular file already exists at '{resolved_path}'. Cannot create directory.",
+                details={"error_category": "file_exists_conflict"},
+            )
+
+        # Idempotent handling for existing directory
+        if resolved_path.exists() and resolved_path.is_dir():
+            if exist_ok:
+                return FileOperationResult(
+                    success=True,
+                    operation="create_directory",
+                    target_path=str(resolved_path),
+                    message=f"Directory already exists: '{resolved_path}'.",
+                    details={
+                        "directory_name": resolved_path.name,
+                        "path": str(resolved_path),
+                        "directory_path": str(resolved_path),
+                        "already_exists": True,
+                        "verified": True,
+                    },
+                )
+            else:
+                return FileOperationResult(
+                    success=False,
+                    operation="create_directory",
+                    target_path=str(resolved_path),
+                    message=f"Directory already exists: '{resolved_path}'.",
+                    details={"error_category": "directory_already_exists"},
+                )
+
+        try:
+            resolved_path.mkdir(parents=parents, exist_ok=True)
+            # Physical filesystem verification
+            if resolved_path.exists() and resolved_path.is_dir():
+                return FileOperationResult(
+                    success=True,
+                    operation="create_directory",
+                    target_path=str(resolved_path),
+                    message=f"Directory successfully created and verified: '{resolved_path}'.",
+                    details={
+                        "directory_name": resolved_path.name,
+                        "path": str(resolved_path),
+                        "directory_path": str(resolved_path),
+                        "already_exists": False,
+                        "verified": True,
+                    },
+                )
+            else:
+                return FileOperationResult(
+                    success=False,
+                    operation="create_directory",
+                    target_path=str(resolved_path),
+                    message="Directory creation command executed but filesystem verification failed.",
+                    details={"error_category": "verification_failed"},
+                )
+        except PermissionError as p_err:
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=str(resolved_path),
+                message=f"Windows filesystem permission denied: {p_err}",
+                details={"error_category": "access_denied"},
+            )
+        except OSError as os_err:
+            return FileOperationResult(
+                success=False,
+                operation="create_directory",
+                target_path=str(resolved_path),
+                message=f"Filesystem error creating directory: {os_err}",
+                details={"error_category": "os_error"},
+            )
 
     def write_text(
         self,

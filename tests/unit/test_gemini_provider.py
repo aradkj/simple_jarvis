@@ -27,6 +27,7 @@ def mock_settings() -> Settings:
         gemini_max_output_tokens=2048,
         gemini_request_timeout=15.0,
         conversation_history_limit=10,
+        gemini_auto_model_selection=False,
     )
 
 

@@ -39,6 +39,36 @@ class AntigravityAdapter:
             "active_tasks_count": len(self.task_manager._tasks),
         }
 
+    def resolve_workspace(self, workspace_hint: str | Path | None = None) -> Path:
+        """Resolve workspace from explicit path, project name, or file intelligence."""
+        if workspace_hint:
+            p = Path(workspace_hint).resolve()
+            if p.is_dir():
+                return p
+            # Try file intelligence to search for matching project directory or file
+            try:
+                from core.files import get_file_search_engine
+
+                engine = get_file_search_engine()
+                results = engine.search(str(workspace_hint), limit=5)
+                for r in results:
+                    rp = Path(r.path)
+                    candidate_dir = rp if rp.is_dir() else rp.parent
+                    if candidate_dir.is_dir() and (
+                        (candidate_dir / ".git").exists()
+                        or (candidate_dir / "pyproject.toml").exists()
+                    ):
+                        logger.info(
+                            f"Resolved workspace '{workspace_hint}' to '{candidate_dir}' via File Intelligence"
+                        )
+                        return candidate_dir
+                    if candidate_dir.is_dir():
+                        return candidate_dir
+            except Exception as exc:
+                logger.debug(f"Workspace resolution via file intelligence failed: {exc}")
+
+        return Path.cwd().resolve()
+
     def delegate(
         self,
         prompt: str,
@@ -48,9 +78,10 @@ class AntigravityAdapter:
         context: ExecutionContext | None = None,
     ) -> CodingTask:
         """Delegate task to Antigravity."""
+        effective_ws = self.resolve_workspace(workspace_path)
         return self.task_manager.delegate_task(
             prompt=prompt,
-            workspace_path=workspace_path,
+            workspace_path=effective_ws,
             model=model,
             auto_verify=auto_verify,
             context=context,

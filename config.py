@@ -116,6 +116,24 @@ class Settings(BaseSettings):
     gemini_model: str = Field(
         default="gemini-3.5-flash-lite", description="Configured Google Gemini model identifier"
     )
+    gemini_auto_model_selection: bool = Field(
+        default=True,
+        description="Automatically select the strongest available Gemini model with fast failover",
+    )
+    gemini_model_fallback_order: list[str] = Field(
+        default_factory=lambda: [
+            "gemini-2.5-pro",
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash",
+        ],
+        description="Priority order of Gemini models from strongest to lightest for auto-selection and failover",
+    )
     gemini_temperature: float = Field(
         default=0.7, ge=0.0, le=2.0, description="Sampling temperature for text generation"
     )
@@ -498,6 +516,10 @@ class Settings(BaseSettings):
         default=False,
         description="Whether voice input stays listening continuously after activation",
     )
+    voice_require_prefix: bool = Field(
+        default=True,
+        description="Strictly require voice utterances to start with 'Jarvis' (or 'جارویس') before processing",
+    )
     voice_input_device: str = Field(
         default="",
         description="Selected audio capture device description (empty for system default)",
@@ -513,8 +535,8 @@ class Settings(BaseSettings):
         description="RMS energy threshold for Voice Activity Detection",
     )
     voice_silence_timeout_seconds: float = Field(
-        default=1.8,
-        ge=0.5,
+        default=0.8,
+        ge=0.4,
         le=10.0,
         description="Duration of silence in seconds before speech is considered finished",
     )
@@ -523,6 +545,10 @@ class Settings(BaseSettings):
         ge=2.0,
         le=60.0,
         description="Maximum seconds of speech captured per turn",
+    )
+    voice_barge_in_enabled: bool = Field(
+        default=True,
+        description="Enable loud intentional acoustic barge-in interruption during TTS playback",
     )
     voice_stt_language: str = Field(
         default="auto",
@@ -601,7 +627,7 @@ class Settings(BaseSettings):
     )
     response_language_policy: str = Field(
         default="DEFAULT_ENGLISH",
-        description="Response language policy: 'DEFAULT_ENGLISH' (British English default for Persian input unless Persian explicitly requested), 'PERSIAN' (always Persian), 'FOLLOW_USER' (match user language)",
+        description="Response language policy: 'DEFAULT_ENGLISH' (refined British English assistant default), 'FOLLOW_USER' (match user language), 'PERSIAN' (always Persian)",
     )
     azure_speech_key: SecretStr = Field(
         default=SecretStr(""),

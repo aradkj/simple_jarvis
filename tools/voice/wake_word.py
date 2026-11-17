@@ -116,11 +116,11 @@ class AcousticWakeWordDetector:
 
         max_energy = max(energies)
         # Background silence or very low volume: ignore
-        if max_energy < 0.025:
+        if max_energy < 0.010:
             return False, 0.0
 
-        # Segment active speech region (energy > 20% max)
-        thresh = max(0.015, max_energy * 0.20)
+        # Segment active speech region (energy > 15% max)
+        thresh = max(0.008, max_energy * 0.15)
         active_indices = [i for i, e in enumerate(energies) if e >= thresh]
         if not active_indices:
             return False, 0.0
@@ -156,9 +156,9 @@ class AcousticWakeWordDetector:
         )
 
         has_bisyllable = (
-            syllable1_max > 0.03
-            and syllable2_max > 0.02
-            and mid_dip < (min(syllable1_max, syllable2_max) * 0.85)
+            syllable1_max > 0.012
+            and syllable2_max > 0.008
+            and mid_dip < (min(syllable1_max, syllable2_max) * 0.90)
         )
 
         # Check multi-segment energy for 3-syllable "Hey Jarvis"
@@ -169,9 +169,9 @@ class AcousticWakeWordDetector:
             seg_peaks = [
                 max(active_energies[i * seg_len : (i + 1) * seg_len]) for i in range(n_seg)
             ]
-            has_multisyllable = sum(1 for p in seg_peaks if p > 0.02) >= 2
+            has_multisyllable = sum(1 for p in seg_peaks if p > 0.010) >= 2
 
-        has_sibilant_tail = avg_tail_zcr > 0.16 and avg_tail_zcr > (avg_head_zcr * 1.25)
+        has_sibilant_tail = avg_tail_zcr > 0.14 and avg_tail_zcr > (avg_head_zcr * 1.25)
 
         # Confidence calculation based on acoustic match
         score = 0.0
@@ -183,11 +183,10 @@ class AcousticWakeWordDetector:
         if 350.0 <= duration_ms <= 1600.0:
             score += 0.15
 
-        # Apply configurable sensitivity scaling (lower threshold at higher sensitivity)
-        detection_threshold = (
-            0.70 - (self.sensitivity - 0.5) * 0.40
-        )  # 0.50 at sens 1.0, 0.86 at sens 0.1
-        is_detected = score >= detection_threshold
+        # Apply configurable sensitivity scaling (0.65 at sens 0.5, 0.525 at sens 1.0)
+        # Sibilant tail (/s/ in Jarvis) is strictly required to prevent triggering on steady noise
+        detection_threshold = 0.65 - (self.sensitivity - 0.5) * 0.25
+        is_detected = (score >= detection_threshold) and has_sibilant_tail
 
         return is_detected, min(1.0, score)
 
@@ -232,16 +231,24 @@ class WakeWordDetector:
                 "hey, jarvis",
                 "hey jarviss",
                 "hey jarvez",
+                "hi jarvis",
+                "hello jarvis",
+                "ok jarvis",
+                "okay jarvis",
                 "jarvis",
                 "jarviss",
                 "jarvez",
                 "هی جارویس",
                 "هی، جارویس",
+                "هی جارویز",
                 "سلام جارویس",
+                "سلام، جارویس",
                 "جارویس",
                 "جارویسس",
                 "جارویز",
                 "جرویس",
+                "ای جارویس",
+                "اوکی جارویس",
             ]
         )
         sorted_variants = sorted(variants, key=len, reverse=True)
@@ -321,6 +328,38 @@ class WakeWordDetector:
 
         return False, conf
 
+    _START_WAKE_WORD_PATTERN = re.compile(
+        r"""^\s*
+        (?:
+            (?:hey|hi|hello|ok|okay|dear|yo|سلام|هی|اوکی|ای|جناب|آقای)\s*[,:؛،\-]?\s*
+        )?
+        (?:jarvis|jarviss|jarvez|jarves|جارویس|جارویز|جرویس)
+        (?:\b|[\s,:؛،!?\.\-_]|$)
+        """,
+        re.IGNORECASE | re.VERBOSE,
+    )
+
+    def check_starts_with_wake_word(self, text: str) -> tuple[bool, str]:
+        """Verify whether an utterance begins with the wake word (e.g., 'Jarvis ...' or 'جارویس ...').
+
+        Returns:
+            (starts_with_ww: bool, stripped_command: str)
+        """
+        if self._is_listening_muted or self._is_tts_active or not text:
+            return False, text
+
+        text_clean = text.strip()
+        m = self._START_WAKE_WORD_PATTERN.search(text_clean)
+        if m and m.start() == 0:
+            after = text_clean[m.end() :].lstrip(" ,:؛،.!?\n\t-")
+            command = "" if not after.strip(" ,:؛،.!?\n\t-") else after.strip()
+            logger.info(
+                f"Utterance starts with wake word '{m.group(0).strip()}'. Stripped command: '{command}'"
+            )
+            return True, command
+
+        return False, text_clean
+
     def check_text(self, text: str) -> tuple[bool, str]:
         """Secondary verification: Check if transcript contains the wake word.
 
@@ -330,19 +369,17 @@ class WakeWordDetector:
         if self._is_listening_muted or self._is_tts_active:
             return False, text
 
-        now = time.monotonic()
-        if (now - self._last_trigger_time) < self.debounce_seconds:
-            # Debounce window active
-            return False, text
-
         text_clean = text.strip()
         for pat in self._patterns:
             m = pat.search(text_clean)
             if m:
-                self._last_trigger_time = now
                 # Strip wake word from command text
                 command = text_clean[: m.start()] + " " + text_clean[m.end() :]
-                command = re.sub(r"\s+", " ", command).strip(" ,:؛،")
+                command_clean = command.strip()
+                if not command_clean.strip(" ,:؛،.!?\n\t-"):
+                    command = ""
+                else:
+                    command = re.sub(r"^[\s,:؛،.!?\n\t-]+", "", command_clean).strip()
                 logger.info(
                     f"Wake word '{m.group(0)}' detected in transcript! Command: '{command}'"
                 )
@@ -398,3 +435,14 @@ class WakeWordDetector:
             "debounce_seconds": self.debounce_seconds,
             "acoustic_detector": "AcousticWakeWordDetector",
         }
+
+
+_default_wake_detector: WakeWordDetector | None = None
+
+
+def check_starts_with_wake_word(text: str) -> tuple[bool, str]:
+    """Module-level helper to check if an utterance starts with the wake word."""
+    global _default_wake_detector
+    if _default_wake_detector is None:
+        _default_wake_detector = WakeWordDetector()
+    return _default_wake_detector.check_starts_with_wake_word(text)

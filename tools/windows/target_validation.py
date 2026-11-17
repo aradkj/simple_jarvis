@@ -178,6 +178,15 @@ class TargetValidator:
 
         user32 = ctypes.windll.user32
         if not user32.IsWindow(wintypes.HWND(hwnd)):
+            # If not found on current thread desktop, check if attaching to "Default" desktop resolves it
+            try:
+                h_desk = user32.OpenDesktopW("Default", 0, False, 0x01FF)
+                if h_desk:
+                    user32.SetThreadDesktop(h_desk)
+            except Exception:
+                pass
+
+        if not user32.IsWindow(wintypes.HWND(hwnd)):
             raise TargetValidationError(
                 f"Window handle {hwnd} is stale or does not exist on the desktop."
             )
@@ -202,18 +211,33 @@ class TargetValidator:
 
     @classmethod
     def validate_executable_path(cls, path_str: str) -> Path:
-        """Verify executable path exists, is a valid .exe, resides in trusted location, and is not a script."""
+        """Verify executable path exists, resides in trusted location, and resolves to a valid binary."""
+        import shutil
+
         if not path_str or not path_str.strip():
             raise TargetValidationError("Executable path cannot be empty.")
 
         path = Path(path_str).resolve()
         if not path.is_file():
-            raise TargetValidationError(f"Executable file does not exist at '{path}'.")
+            # Check PATH search
+            which_p = shutil.which(path_str) or shutil.which(f"{path_str}.exe")
+            if which_p and Path(which_p).is_file():
+                path = Path(which_p).resolve()
+            else:
+                raise TargetValidationError(f"Executable file does not exist at '{path}'.")
 
-        if path.suffix.lower() != ".exe":
+        # If a .cmd or .bat wrapper was passed specifically for VS Code (e.g. code.cmd), attempt finding underlying Code.exe
+        if path.suffix.lower() in (".cmd", ".bat"):
+            for parent_dir in (path.parent.parent, path.parent):
+                candidate_exe = parent_dir / "Code.exe"
+                if candidate_exe.is_file():
+                    path = candidate_exe.resolve()
+                    break
+
+        if path.suffix.lower() not in (".exe", ".lnk"):
             raise TargetValidationError(
                 f"Target '{path.name}' has invalid extension '{path.suffix}'. "
-                "Only native Windows executables (.exe) are permitted."
+                "Only native Windows executables (.exe, .lnk) are permitted."
             )
 
         # Verify neither executable nor any ancestor directory is a reparse point / junction

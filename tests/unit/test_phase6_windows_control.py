@@ -183,8 +183,8 @@ def test_application_launch_and_close_tools_schema() -> None:
     assert launch_tool.category == PermissionCategory.WINDOWS_APP_LAUNCH
     assert close_tool.category == PermissionCategory.WINDOWS_APP_CLOSE
 
-    assert launch_tool.get_definition().risk_level == RiskLevel.HIGH
-    assert launch_tool.get_definition().requires_approval is True
+    assert launch_tool.get_definition().risk_level == RiskLevel.LOW
+    assert launch_tool.get_definition().requires_approval is False
     assert close_tool.get_definition().risk_level == RiskLevel.HIGH
     assert close_tool.get_definition().requires_approval is True
 

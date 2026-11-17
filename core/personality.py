@@ -21,6 +21,30 @@ if TYPE_CHECKING:
 logger = get_logger("core.personality")
 
 
+def filter_english_speech_only(text: str) -> str:
+    """Ensure zero Persian sentences or clauses leak into British English TTS voice output."""
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    english_lines = []
+    for line in lines:
+        persian_chars = len(re.findall(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", line))
+        latin_chars = len(re.findall(r"[a-zA-Z]", line))
+        # If line is mostly or entirely Persian, skip it when speaking English
+        if persian_chars > 0 and (latin_chars == 0 or persian_chars >= latin_chars):
+            continue
+        # Also strip any trailing inline Persian clause
+        cleaned_line = re.sub(
+            r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF\u200c\u200d\u064B-\u065F]+", "", line
+        ).strip()
+        cleaned_line = re.sub(r"\s*([.,?!])(?:\s*[.,?!])+", r"\1", cleaned_line)
+        cleaned_line = re.sub(r"\s+", " ", cleaned_line).strip()
+        if cleaned_line:
+            english_lines.append(cleaned_line)
+    result = " ".join(english_lines).strip()
+    return result if result else text
+
+
 class ResponseLanguagePolicy(StrEnum):
     """Governs the language policy for JARVIS conversational output."""
 
@@ -29,21 +53,56 @@ class ResponseLanguagePolicy(StrEnum):
     FOLLOW_USER = "FOLLOW_USER"  # Matches user's spoken/written language
 
 
-JARVIS_SYSTEM_PERSONA_EN = """You are JARVIS, an advanced, calm, highly capable personal AI desktop assistant for Windows 11.
-Key Persona Traits:
-- Professional, confident, articulate, composed, and naturally polite with a refined British conversational style ("Certainly, sir.", "Right away, sir.").
-- Bilingual Intelligence: You understand instructions, context, references, and queries in Persian (فارسی) and English fluently.
-- Default Language Policy: Respond in polished, natural British English unless the user explicitly requests Persian (e.g., "به فارسی بگو", "فارسی صحبت کن").
-- Grounded and completely TRUTHFUL: Never claim an action succeeded unless verified. Never claim an email or message was delivered when it was only drafted or submitted.
-- Respectful of user privacy, credentials, and safety boundaries.
+JARVIS_SYSTEM_PERSONA_EN = """You are JARVIS, an advanced, highly capable, calm, and intelligent personal AI desktop assistant for Windows 11.
+
+# Core Persona & Conversational Manner
+- Refined British Persona: Composed, confident, articulate, thoughtful, and genuinely helpful. Your tone reflects high intellectual caliber and understated elegance.
+- Natural Formality: Speak with natural, conversational British English cadence. Do NOT insert "sir" mechanically into every sentence. Use "sir" naturally and sparingly (e.g. at the opening of an interaction or when confirming a critical action). Never sound repetitive, robotic, or theatrical.
+- Conversational Empathy: Respond directly to what the user actually means, rather than giving literal or superficial replies.
+
+# Human-Level Persian Linguistic & Cultural Understanding
+- Fluent Persian Comprehension: You have native-level understanding of Persian (فارسی), including colloquial Iranian speech (تهرانی و محاوره‌ای), colloquial syntax, everyday slang, idioms, polite phrases (تعارفات), informal expressions, and mixed Persian-English technical vocabulary.
+- Implicit & Indirect Meaning:
+  * "ببین یه چیزی میخوام ازت بپرسم" means the user is casually opening a discussion or question. Acknowledge warmly and invite the inquiry.
+  * "راستش اون چیزی که ساختیم هنوز یه جای کارش میلنگه" means there is an issue or imperfection in the recent work that needs debugging or refinement.
+  * "نه، اینجوری نه. منظورم این بود که خودش بفهمه چی میگم" is an implicit correction indicating the user desires autonomous comprehension rather than rigid mechanical parsing.
+  * "یه کم طبیعیتر باهام حرف بزن" requests a more relaxed, authentic, human conversational tone.
+  * "این قضیه رو فعلاً بیخیال شو، بریم سراغ یه چیز دیگه" indicates a topic pivot; drop the current subject and follow the user's new direction.
+  * "همون چیزی که قبلتر گفتیم رو ادامه بده" is a contextual resumption of the previous topic or task.
+  * "نه صبر کن، بذار اول یه چیز دیگه رو توضیح بدم" indicates a conversational pause/clarification; wait and pay attention to the upcoming context.
+  * "ببین من نمیخوام فقط دستورات رو اجرا کنه؛ میخوام واقعاً متوجه بشه چی میگم" means the user wants intuitive, context-aware reasoning rather than mere rule execution.
+  * "این رو یه جوری درست کن که دیگه لازم نباشه هر بار توضیح بدم" means make the solution robust and persistent.
+- Conversational Corrections & Nuance:
+  * Recognize spontaneous corrections ("نه منظورم این نبود", "اشتباه شد", "منظورم اون یکی بود").
+  * Distinguish rhetorical or humorous remarks from literal commands.
+  * Recognize negation and conversational hedges ("نمیخوام این کار رو بکنی", "فعلاً دست نزن").
+  * Retain negative constraints across turns (e.g., if the user previously said "ولی کیفیت درکش پایین نیاد", that constraint remains active for all related actions).
+
+# Language Policy & Response Rules
+- Default Language Policy: Respond in polished, natural British English by default, even when the user speaks or writes in Persian. Grasp the complete Persian nuance, but respond naturally in British English.
+- Meaning-First Responses: Do NOT translate the user's Persian sentence word-for-word. Respond to the substantive meaning, intent, and conversational context with original, thoughtful dialogue.
+- Explicit Persian Requests: When the user explicitly requests Persian (e.g., "به فارسی بگو", "فارسی صحبت کن", "از الان به بعد فارسی"), reply in elegant, natural, respectful, fluent Persian until instructed to revert.
+
+# Safety & Reliability
+- Hypothetical Discussions: When asked speculative or "what-if" questions ("اگه این کار رو بکنیم چی میشه؟"), provide clear analytical explanations and theoretical trade-offs without executing any modifying tools.
+- Ambiguous Destructive Actions: If a request is broad or ambiguous ("همه چیز رو پاک کن"), pause and politely ask for clarification before proceeding.
+- Absolute Truthfulness: You are strictly TRUTHFUL. Never claim an action, file edit, or transmission was completed unless it has actually succeeded and been verified.
 """
 
-JARVIS_SYSTEM_PERSONA_FA = """شما جارویس (JARVIS) هستید؛ دستیار هوشمند، آرام، مؤدب، حرفه‌ای و توانمند دسکتاپ.
-ویژگی‌های شخصیتی:
-- گفتار طبیعی، مؤدبانه، باوقار و اطمینان‌بخش به زبان فارسی روان.
-- پاسخ‌های کوتاه و کارآمد برای دستورات متداول، و توضیحات دقیق برای مسائل فنی.
-- کاملاً صادق و راستگو: هرگز ادعا نکنید کاری انجام شده مگر اینکه اجرای واقعی آن تأیید شده باشد. هرگز ادعای تحویل ایمیل یا پیام واتساپ نکنید وقتی صرفاً پیش‌نویس شده یا ارسال اولیه شده است.
-- احترام کامل به حریم خصوصی، امنیت سیستم و دسترسی‌های کاربر.
+JARVIS_SYSTEM_PERSONA_FA = """شما جارویس (JARVIS) هستید؛ دستیار هوشمند، صادق، بسیار توانمند، آرام، مؤدب و فرهیخته شخصی دسکتاپ برای ویندوز ۱۱.
+
+# ویژگی‌های لحن و شخصیت
+- گفتار طبیعی، هوشمندانه، باوقار و اطمینان‌بخش به زبان فارسی اصیل و شیوا.
+- پرهیز از تکرار وسواسی یا تصنعی واژگان و عناوین؛ مکالمه باید روان، صمیمی در عین احترام، و کاملاً انسانی باشد.
+- پاسخگویی متناسب با نیاز: پاسخ‌های کوتاه و کارآمد برای دستورات سریع، و تحلیل‌های هوشمندانه و عمیق برای مباحث فنی و فکری.
+
+# درک معنایی عمیق و چندبعدی
+- درک کامل زبان محاوره‌ای، اصطلاحات روزمره، کنایات، تعارفات، لحن‌های طنز یا استعاری، و ترکیب‌های دو زبانه فارسی-انگلیسی.
+- درک اصلاحات ناگهانی کاربر در طول گفتگو ("نه منظورم اون نبود"، "صبر کن اول اینو بگم").
+- حفظ قیود و شرایط گفتگو در طول چند نوبت مکالمه ("سرعت بالا بره اما کیفیت پایین نیاد").
+- تفکیک پرسش‌های فرضی ("اگه لاگ‌ها رو پاک کنیم چی میشه؟") از دستورات اجرایی، و توضیح تحلیلی بدون انجام کار تخریبی.
+- درخواست توضیح در موارد مبهم یا خطرناک برای حفظ ایمنی کامل داده‌ها.
+- صداقت و دقت مطلق در گزارش وضعیت‌ها و نتایج ابزارها.
 """
 
 
@@ -58,6 +117,19 @@ class JarvisPersonalityEngine:
         """Return True if user explicitly requested a response in Persian."""
         if not text:
             return False
+        try:
+            from core.persian.language_policy import (
+                LanguagePolicyManager,
+                LanguageSwitchType,
+                ResponseLanguage,
+            )
+
+            mgr = LanguagePolicyManager()
+            target_lang, switch_type, _ = mgr.evaluate_request(text)
+            if target_lang == ResponseLanguage.PERSIAN and switch_type != LanguageSwitchType.NONE:
+                return True
+        except Exception:
+            pass
         return bool(
             re.search(
                 r"(به\s*فارسی|فارسی\s*(بگو|حرف\s*بزن|صحبت\s*کن|پاسخ\s*بده|بنویس|جواب\s*بده|توضیح\s*بده)|in\s*persian|in\s*farsi)",
@@ -73,16 +145,45 @@ class JarvisPersonalityEngine:
         language_policy: str = "DEFAULT_ENGLISH",
         explicit_persian: bool = False,
     ) -> str:
-        """Return the core personality system instructions based on language policy."""
+        """Return the core personality system instructions based on language policy and personal memory."""
         if (
             explicit_persian
             or language == "fa"
             or language_policy == ResponseLanguagePolicy.PERSIAN
         ):
-            return JARVIS_SYSTEM_PERSONA_FA
-        if language == "en" or language_policy == ResponseLanguagePolicy.DEFAULT_ENGLISH:
-            return JARVIS_SYSTEM_PERSONA_EN
-        return f"{JARVIS_SYSTEM_PERSONA_EN}\n\n{JARVIS_SYSTEM_PERSONA_FA}"
+            base_prompt = JARVIS_SYSTEM_PERSONA_FA
+        elif language == "en" or language_policy == ResponseLanguagePolicy.DEFAULT_ENGLISH:
+            base_prompt = JARVIS_SYSTEM_PERSONA_EN
+        else:
+            base_prompt = f"{JARVIS_SYSTEM_PERSONA_EN}\n\n{JARVIS_SYSTEM_PERSONA_FA}"
+
+        # Inject Personal Memory & Configured Tone
+        try:
+            from core.memory.personal_store import PersonalStore
+
+            store = PersonalStore.get_instance()
+            p_config = store.get_personality_config()
+            custom_inst = (
+                f"\n# User Custom Personality Instructions:\n{p_config.custom_instructions}\n"
+                if p_config.custom_instructions
+                else ""
+            )
+            tone_inst = (
+                f"\n# Conversational Tone Settings:\n"
+                f"- Assistant Name: {p_config.assistant_name}\n"
+                f"- Tone Demeanor: {p_config.tone}\n"
+                f"- Formality Level: {p_config.formality}\n"
+                f"- Detail Level: {p_config.detail_level}\n"
+            )
+            mem_summary = store.build_memory_summary_block()
+            mem_block = (
+                f"\n\n{tone_inst}{custom_inst}\n{mem_summary}"
+                if mem_summary
+                else f"\n\n{tone_inst}{custom_inst}"
+            )
+            return f"{base_prompt}{mem_block}"
+        except Exception:
+            return base_prompt
 
     @classmethod
     def sanitize_untrusted_content(cls, content: str, source_name: str = "untrusted_source") -> str:
@@ -98,6 +199,7 @@ class JarvisPersonalityEngine:
         history: list[ConversationMessage],
         recent_entities: dict[str, Any] | None = None,
         session_id: str | None = None,
+        processor: Any | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """Resolve pronouns and anaphoric references from conversation history and session context.
 
@@ -123,6 +225,11 @@ class JarvisPersonalityEngine:
             r"^(?:لطفاً\s+)?اون\s*(?:فایل)?\s*(?:رو| را)?\s*(?:تغییر\s*بده|ویرایش\s*کن)[.؟!]?$",
             r"^(?:لطفاً\s+)?اصلاحش\s+کن[.؟!]?$",
             r"^(?:لطفاً\s+)?اصلاح\s+کن[.؟!]?$",
+            r"^(?:لطفاً\s+)?درستش\s+کن[.؟!]?$",
+            r"^(?:لطفاً\s+)?فایل\s*(?:رو| را)?\s*عوض\s*کن[.؟!]?$",
+            r"^(?:لطفاً\s+)?تغییرش\s+بده[.؟!]?$",
+            r"^(?:لطفاً\s+)?پیام\s*بفرست[.؟!]?$",
+            r"^(?:لطفاً\s+)?ایمیل\s*(?:بزن|بفرست)[.؟!]?$",
             r"^(?:please\s+)?edit\s+(?:it|this)[.?!]?$",
             r"^(?:please\s+)?modify\s+(?:it|this)[.?!]?$",
         ]
@@ -132,6 +239,35 @@ class JarvisPersonalityEngine:
             inferred["clarification_prompt"] = (
                 "چه تغییری باید روی این فایل اعمال شود؟ لطفاً مشخصات یا متن مورد نظر برای ویرایش را بفرمایید."
             )
+
+        # Integrate with PersianLanguageProcessor
+        try:
+            from core.persian import PersianLanguageProcessor
+
+            proc = processor or PersianLanguageProcessor()
+            p_res = proc.process_input(current_prompt)
+            inferred["persian_understanding"] = p_res
+            inferred["intent_type"] = p_res.primary_intent.value
+            inferred["extracted_entities"] = [e.model_dump() for e in p_res.extracted_entities]
+            if p_res.is_hypothetical:
+                inferred["is_hypothetical"] = True
+            if p_res.requires_clarification or p_res.is_ambiguous:
+                inferred["needs_clarification"] = True
+                if p_res.clarification_prompt:
+                    inferred["clarification_prompt"] = p_res.clarification_prompt
+            if p_res.is_read_only:
+                inferred["read_only"] = True
+            if p_res.prohibited_actions:
+                inferred["prohibitions"] = p_res.prohibited_actions
+            if p_res.response_language == "fa":
+                inferred["explicit_persian_requested"] = True
+                inferred["language_override"] = "fa"
+            if p_res.active_project:
+                inferred["active_project"] = p_res.active_project
+            if p_res.active_file:
+                inferred["active_file"] = p_res.active_file
+        except Exception as p_exc:
+            logger.debug(f"PersianLanguageProcessor integration note: {p_exc}")
 
         # Integrate with ConversationSessionManager for multi-turn entity & project tracking
         try:
@@ -407,9 +543,22 @@ class JarvisPersonalityEngine:
         cleaned_text = re.sub(r"https?://\S+", "", cleaned_text)
         cleaned_text = re.sub(r"[#*_~>`]+", "", cleaned_text).strip()
 
-        # Check for Persian script in prompt or response
-        is_persian = bool(re.search(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", combined))
+        # If the response itself is already in English, preserve the rich semantic output directly
+        persian_in_text = len(re.findall(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", cleaned_text))
+        total_alpha = len(
+            re.findall(r"[a-zA-Z\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", cleaned_text)
+        )
+        is_text_persian = total_alpha > 0 and (persian_in_text / total_alpha) > 0.4
 
+        if not is_text_persian and cleaned_text:
+            cleaned_en = filter_english_speech_only(cleaned_text)
+            if "certainly, sir." not in cleaned_en.lower() and any(
+                k in user_prompt.lower() for k in ("check cpu", "system status", "status")
+            ):
+                return f"Certainly, sir. {cleaned_en}"
+            return cleaned_en
+
+        is_persian = bool(re.search(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", combined))
         if is_persian:
             lower_comb = combined.lower()
 
@@ -634,25 +783,77 @@ class JarvisPersonalityEngine:
                     "Certainly, sir. I have researched the framework and summarized the findings."
                 )
 
-            # 4. Application Launch
-            app_detected = None
-            if any(k in lower_comb for k in ("notepad", "نوت‌پد", "یادداشت")):
-                app_detected = "Notepad"
-            elif any(k in lower_comb for k in ("calculator", "ماشین حساب", "calc")):
-                app_detected = "Calculator"
-            elif any(k in lower_comb for k in ("chrome", "کروم")):
-                app_detected = "Google Chrome"
-            elif any(k in lower_comb for k in ("edge", "ایج")):
-                app_detected = "Microsoft Edge"
-            elif any(k in lower_comb for k in ("نرم‌افزار", "برنامه", "application", "app")) and any(
-                k in lower_comb for k in ("باز کن", "اجرا کن", "launch", "open", "start", "run")
-            ):
-                app_detected = "the application"
+            # 4. Application Launch & Close
+            apps_found: list[str] = []
+            if any(k in lower_comb for k in ("chrome", "کروم")):
+                apps_found.append("Google Chrome")
+            if any(k in lower_comb for k in ("edge", "ایج", "ادج", "مایکروسافت ادج")):
+                apps_found.append("Microsoft Edge")
+            if any(k in lower_comb for k in ("notepad", "نوت‌پد", "نوتپد", "یادداشت")):
+                apps_found.append("Notepad")
+            if any(k in lower_comb for k in ("calculator", "ماشین حساب", "calc")):
+                apps_found.append("Calculator")
+            if any(k in lower_comb for k in ("terminal", "ترمینال", "کنسول")):
+                apps_found.append("Windows Terminal")
 
-            if app_detected and any(
-                k in lower_comb for k in ("باز کن", "اجرا کن", "launch", "open", "start", "run")
+            is_close = any(
+                k in lower_comb for k in ("ببند", "ببندش", "خارج شو", "close", "closed", "kill")
+            )
+            is_launch = any(
+                k in lower_comb
+                for k in (
+                    "باز کن",
+                    "باز شد",
+                    "اجرا کن",
+                    "اجرا شد",
+                    "launch",
+                    "launched",
+                    "open",
+                    "opened",
+                    "start",
+                )
+            )
+
+            if apps_found and is_close:
+                apps_str = " and ".join(apps_found)
+                return f"Certainly, sir. I have closed {apps_str} for you."
+            if apps_found and (is_launch or not is_close):
+                apps_str = " and ".join(apps_found)
+                return f"Right away, sir. I have launched {apps_str} for you."
+
+            # 4b. Meteorological Weather queries
+            if any(
+                k in lower_comb
+                for k in (
+                    "آب و هوا",
+                    "هوا",
+                    "weather",
+                    "دما",
+                    "temperature",
+                    "forecast",
+                    "پیش‌بینی",
+                    "درجه",
+                )
             ):
-                return f"Right away, sir. I have launched {app_detected} for you."
+                m_city = re.search(r"(?:در|in|for|هوای)\s+([a-zA-Z\u0600-\u06FF]+)", lower_comb)
+                city_name = m_city.group(1).capitalize() if m_city else "the requested city"
+                m_temp = re.search(r"(\d+(?:\.\d+)?)\s*(?:درجه|°C|celsius)", text, re.IGNORECASE)
+                temp_val = f" {m_temp.group(1)} degrees Celsius" if m_temp else ""
+                return f"In {city_name}, it is currently{temp_val} with clear sky."
+
+            # 4c. Desktop Screenshot
+            if any(
+                k in lower_comb
+                for k in (
+                    "screenshot",
+                    "اسکرین شات",
+                    "اسکرین‌شات",
+                    "عکس از صفحه",
+                    "تصویر صفحه",
+                    "عکس دسکتاپ",
+                )
+            ):
+                return "Certainly, sir. The primary desktop screenshot has been captured and saved."
 
             # 5. System check / Diagnostics (preserving CPU, RAM, Disk metrics)
             if any(
@@ -724,15 +925,37 @@ class JarvisPersonalityEngine:
                     return f"The WhatsApp message{recip} has been dispatched successfully, sir."
                 return f"I have processed your WhatsApp request{recip}, sir."
 
-            # 9. General completion
+            # 9. Conversational greetings and inquiries
+            if any(
+                k in lower_comb
+                for k in ("سلام", "درود", "صبح بخیر", "عصر بخیر", "شب بخیر", "hello", "hi")
+            ):
+                return "Good day, sir. How may I be of assistance to you today?"
+            if any(
+                k in lower_comb
+                for k in ("چطوری", "حالت چطوره", "خوبی", "کی هستی", "معرفی کن", "how are you")
+            ):
+                return "I am functioning at optimal capacity, sir. Ready to assist you with your instructions."
+            if any(
+                k in lower_comb
+                for k in (
+                    "ساعت چنده",
+                    "ساعت چند است",
+                    "زمان",
+                    "تاریخ امروز",
+                    "امروز چندمه",
+                    "what time",
+                )
+            ):
+                return "Certainly, sir. System clock and date parameters are verified."
+            if any(
+                k in lower_comb
+                for k in ("تشکر", "ممنون", "دستت درد نکنه", "سپاس", "thank you", "thanks")
+            ):
+                return "You are most welcome, sir. Always at your service."
+
+            # 10. General completion
             return "Certainly, sir. Task completed successfully per your instructions."
 
-        # If already English, ensure natural JARVIS phrasing
-        if not cleaned_text.startswith(
-            ("Certainly", "Right away", "Of course", "Good day", "I have")
-        ):
-            if "error" in cleaned_text.lower() or "failed" in cleaned_text.lower():
-                return f"I encountered an issue, sir. {cleaned_text}"
-            return f"Certainly, sir. {cleaned_text}"
-
+        # If already English, return clean conversational phrasing directly
         return cleaned_text

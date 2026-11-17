@@ -11,6 +11,7 @@ from tools.windows.audio_tools import (
     WindowsAudioSetVolumeTool,
 )
 from tools.windows.display_tools import (
+    WindowsDesktopScreenshotTool,
     WindowsDisplayGetBrightnessTool,
     WindowsDisplaySetBrightnessTool,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "WindowsAudioSetVolumeTool",
     "WindowsControlError",
     "WindowsControlService",
+    "WindowsDesktopScreenshotTool",
     "WindowsDisplayGetBrightnessTool",
     "WindowsDisplaySetBrightnessTool",
     "WindowsPowerGetStatusTool",

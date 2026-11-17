@@ -18,7 +18,7 @@ class VoiceActivityDetector:
     def __init__(
         self,
         energy_threshold: float = 0.015,
-        silence_timeout_seconds: float = 1.8,
+        silence_timeout_seconds: float = 2.2,
         sample_rate: int = 16000,
         sample_width_bytes: int = 2,
     ) -> None:
@@ -105,8 +105,14 @@ class VoiceActivityDetector:
             noise_floor=self.noise_floor,
         )
 
-    def is_silence_timeout_reached(self) -> bool:
+    def is_silence_timeout_reached(self, adaptive: bool = True) -> bool:
         """Return True if user was speaking and has now been silent past timeout."""
-        return (self.is_speech_active or self.speech_detected_in_utterance) and (
-            self.continuous_silence_seconds >= self.silence_timeout_seconds
-        )
+        if not (self.is_speech_active or self.speech_detected_in_utterance):
+            return False
+
+        timeout = self.silence_timeout_seconds
+        # For fluid conversation, 0.55s silence after confirmed speech detects endpoint quickly
+        if adaptive and self.speech_detected_in_utterance and timeout > 0.55:
+            timeout = 0.55
+
+        return self.continuous_silence_seconds >= timeout

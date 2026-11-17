@@ -50,6 +50,7 @@ class AgentEventType(StrEnum):
     VOICE_TRANSCRIPT_READY = "voice.transcript_ready"
     VOICE_TTS_STARTED = "voice.tts_started"
     VOICE_TTS_STOPPED = "voice.tts_stopped"
+    VOICE_MIC_LEVEL = "voice.mic_level"
     EMAIL_COMPOSED = "email.composed"
     EMAIL_SENT = "email.sent"
     WHATSAPP_COMPOSED = "whatsapp.composed"

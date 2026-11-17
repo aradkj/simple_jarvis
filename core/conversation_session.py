@@ -69,6 +69,9 @@ class ConversationSessionContext:
     pending_clarification: dict[str, Any] | None = None
     last_intent: IntentType = IntentType.UNKNOWN
     is_hypothetical: bool = False
+    last_created_directory_path: Path | None = None
+    last_created_directory_name: str | None = None
+    last_target_directory_type: str | None = None
 
     @property
     def language_preference(self) -> str:
@@ -265,6 +268,168 @@ class ConversationSessionManager:
             inferred["intent_type"] = intent.value
             inferred["is_hypothetical"] = is_hypo
 
+            # 0a. Check pending clarification for folder name
+            if (
+                session.pending_clarification
+                and session.pending_clarification.get("type") == "folder_name"
+            ):
+                dest = session.pending_clarification.get("destination", "Desktop")
+                clean_name = resolved_text.strip().strip("\"'«»")
+                m_called = re.search(
+                    r'(?:call\s+it|name\s+it|named|called|به\s*اسم|به\s*نام|با\s*نام)\s+["\'«»]?([^"\'«»\n]+)["\'«»]?',
+                    clean_name,
+                    re.IGNORECASE,
+                )
+                if m_called:
+                    clean_name = m_called.group(1).strip()
+                if len(clean_name) > 0 and not any(
+                    k in clean_name.lower() for k in ("cancel", "nevermind", "بیخیال", "لغو")
+                ):
+                    session.pending_clarification = None
+                    resolved_text = f"Create a folder on {dest} called {clean_name}"
+                    inferred["resolved_folder_name"] = clean_name
+                    inferred["resolved_destination"] = dest
+                    logger.info(
+                        f"Resolved pending folder name clarification: '{clean_name}' on {dest}"
+                    )
+
+            # 0b. Check for destination correction ("No, I meant Documents", "روی دسکتاپ نه، تو داکیومنت", "نه منظورم داکیومنتس بود")
+            dest_correction_patterns = [
+                r"\b(?:no,?\s+)?(?:i\s+meant|in|on)\s+(documents?|desktop|downloads?)\b",
+                r"(?:نه|نه\s*منظورم|روی|توی|در)\s*(داکیومنت|دسکتاپ|دانلود|دانلودها|اسناد)",
+            ]
+            for pat in dest_correction_patterns:
+                m_corr = re.search(pat, resolved_text, re.IGNORECASE)
+                if m_corr:
+                    matched_kw = m_corr.group(1).lower()
+                    target_dest = (
+                        "Documents"
+                        if any(k in matched_kw for k in ("doc", "داکیومنت", "اسناد"))
+                        else (
+                            "Downloads"
+                            if any(k in matched_kw for k in ("download", "دانلود"))
+                            else "Desktop"
+                        )
+                    )
+                    if (
+                        session.pending_clarification
+                        and session.pending_clarification.get("type") == "folder_name"
+                    ):
+                        session.pending_clarification["destination"] = target_dest
+                        resolved_text = f"Create a folder on {target_dest}"
+                        inferred["destination_correction"] = target_dest
+                        break
+                    elif session.last_created_directory_name:
+                        resolved_text = f"Create a folder in {target_dest} called {session.last_created_directory_name}"
+                        inferred["destination_correction"] = target_dest
+                        logger.info(
+                            f"Resolved destination correction to '{target_dest}' for folder '{session.last_created_directory_name}'"
+                        )
+                        break
+
+            # 0c. Check for anaphoric nested folder creation ("Put another folder inside it called Projects")
+            nested_cues = (
+                "inside it",
+                "inside that folder",
+                "in it",
+                "in that folder",
+                "inside the project",
+                "in the project",
+                "inside project",
+                "in project",
+                "توش",
+                "داخلش",
+                "توی اون",
+                "درون آن",
+                "توی همین پوشه",
+                "توی پوشه قبلی",
+                "توی همون پوشه",
+                "داخل پروژه",
+                "توی پروژه",
+            )
+            has_nested = any(c in resolved_text.lower() for c in nested_cues)
+            is_folder_req = any(
+                k in resolved_text.lower()
+                for k in ("folder", "directory", "پوشه", "فولدر", "دایرکتوری")
+            )
+            target_parent = (
+                session.active_project_path
+                if (
+                    (
+                        "project" in resolved_text.lower()
+                        or "پروژه" in resolved_text.lower()
+                        or not session.last_created_directory_path
+                    )
+                    and session.active_project_path
+                )
+                else session.last_created_directory_path
+            )
+            if has_nested and is_folder_req and target_parent:
+                child_name = ""
+                m_sub = re.search(
+                    r'(?:called|named|به\s*نام|به\s*اسم|با\s*نام)\s+["\'«»]?([^"\'«»\n]+)["\'«»]?',
+                    resolved_text,
+                    re.IGNORECASE,
+                )
+                if m_sub:
+                    cand = m_sub.group(1).strip().rstrip(".,;:")
+                    cand = re.split(
+                        r"\b(inside|in|on|at|توی|روی|در|داخل)\b", cand, flags=re.IGNORECASE
+                    )[0].strip()
+                    child_name = cand
+                elif '"' in resolved_text or "'" in resolved_text:
+                    parts = re.split(r'["\']', resolved_text)
+                    if len(parts) > 1 and parts[1].strip():
+                        child_name = parts[1].strip()
+
+                if child_name:
+                    resolved_text = f"Create a directory at {target_parent} called {child_name}"
+                    inferred["parent_directory_path"] = str(target_parent)
+                    inferred["resolved_child_folder"] = child_name
+                    logger.info(
+                        f"Resolved nested folder creation inside '{target_parent}' called '{child_name}'"
+                    )
+
+            # 0d. Check for folder opening anaphora ("Open that folder", "اون پوشه رو باز کن")
+            if (
+                re.search(r"\b(open\s+(?:that|the|this)\s+folder)\b", resolved_text, re.IGNORECASE)
+                or re.search(
+                    r"(?:اون\s*پوشه|همون\s*پوشه|این\s*پوشه)\s*رو\s*باز\s*کن", resolved_text
+                )
+            ) and session.last_created_directory_path:
+                resolved_text = f"Open folder {session.last_created_directory_path}"
+                inferred["file_path"] = str(session.last_created_directory_path)
+                inferred["resolved_folder_open"] = str(session.last_created_directory_path)
+
+            # 0e. Check for folder name correction or rename ("Actually, call it Backend instead", "نه، اسمشو بگذار Backend")
+            rename_cues = [
+                r"\b(?:actually,?\s+)?(?:call|name)\s+it\s+[\"']?([^\"'\n]+)[\"']?\s+instead\b",
+                r"\b(?:actually,?\s+)?rename\s+it\s+to\s+[\"']?([^\"'\n]+)[\"']?\b",
+                r"(?:نه|اصلا|در واقع|به جای اون)?\s*(?:اسمشو|نامش را|اسمش رو)\s*(?:بگذار|بذار|تغییر بده به)\s+[\"\'«»]?([^\"\'«»\n]+)[\"\'«»]?",
+            ]
+            for pat in rename_cues:
+                m_ren = re.search(pat, resolved_text, re.IGNORECASE)
+                if m_ren:
+                    new_folder_name = m_ren.group(1).strip().rstrip(".,;:")
+                    if session.last_created_directory_path:
+                        parent_dir = session.last_created_directory_path.parent
+                        resolved_text = f"Rename directory at {session.last_created_directory_path} to {new_folder_name}"
+                        inferred["rename_source"] = str(session.last_created_directory_path)
+                        inferred["rename_target"] = str(parent_dir / new_folder_name)
+                        inferred["resolved_folder_name"] = new_folder_name
+                        logger.info(
+                            f"Resolved directory rename correction from '{session.last_created_directory_path}' to '{new_folder_name}'"
+                        )
+                        break
+                    elif session.active_project_path:
+                        resolved_text = f"Create a directory at {session.active_project_path} called {new_folder_name}"
+                        inferred["parent_directory_path"] = str(session.active_project_path)
+                        inferred["resolved_folder_name"] = new_folder_name
+                        logger.info(
+                            f"Resolved directory correction inside active project '{session.active_project_path}' called '{new_folder_name}'"
+                        )
+                        break
+
             # Check explicit language override request ("به فارسی بگو", "explain in English")
             if re.search(
                 r"\b(به\s+فارسی\s+بگو|فارسی\s+توضیح\s+بده|explain\s+(?:that\s+)?in\s+persian)\b",
@@ -292,34 +457,42 @@ class ConversationSessionManager:
             detected_project: str | None = None
             detected_project_path: Path | None = None
 
-            # Check known project names
-            project_keywords = {
-                "pc shop": ["pc shop", "pcshop", "پیسیشاپ", "پی سی شاپ", "فروشگاه کامپیوتر"],
-                "document processing": [
-                    "document processing",
-                    "doc processing",
-                    "پردازش سند",
-                    "داکیومنت",
-                ],
-                "jarvis": ["jarvis", "جارویس", "دستیار"],
-            }
-            # Add dynamically registered projects
-            for p_name in self._registered_projects:
-                if p_name not in project_keywords:
-                    project_keywords[p_name] = [p_name]
+            try:
+                from core.files.project_resolver import get_project_resolver
 
-            for canon_name, aliases in project_keywords.items():
-                if any(alias in norm_lower for alias in aliases):
-                    detected_project = canon_name
-                    if canon_name in self._registered_projects:
-                        detected_project_path = self._registered_projects[canon_name]
-                    break
+                proj_resolver = get_project_resolver()
+                resolved_p = proj_resolver.resolve_project(resolved_text)
+                if resolved_p:
+                    detected_project = resolved_p.name
+                    detected_project_path = resolved_p.path
+            except Exception as e:
+                logger.debug(f"Project resolution lookup error: {e}")
+
+            if not detected_project:
+                # Check known project names
+                project_keywords = {
+                    "pc shop": ["pc shop", "pcshop", "پیسیشاپ", "پی سی شاپ", "فروشگاه کامپیوتر"],
+                    "document processing": [
+                        "document processing",
+                        "doc processing",
+                        "پردازش سند",
+                        "داکیومنت",
+                    ],
+                    "jarvis": ["jarvis", "جارویس", "دستیار"],
+                }
+                for p_name in self._registered_projects:
+                    if p_name not in project_keywords:
+                        project_keywords[p_name] = [p_name]
+
+                for canon_name, aliases in project_keywords.items():
+                    if any(alias in norm_lower for alias in aliases):
+                        detected_project = canon_name
+                        if canon_name in self._registered_projects:
+                            detected_project_path = self._registered_projects[canon_name]
+                        break
 
             if detected_project:
-                display_name = "PC Shop" if detected_project == "pc shop" else detected_project
-                if detected_project == "pc shop" and not detected_project_path:
-                    detected_project_path = Path("C:\\AI\\pc-shop")
-
+                display_name = detected_project
                 session.active_project_name = display_name
                 session.active_project_path = detected_project_path
                 session.add_entity("project", display_name, value=detected_project_path)
@@ -333,12 +506,12 @@ class ConversationSessionManager:
                     f"Resolved explicit project: '{display_name}' (path={detected_project_path})"
                 )
             else:
-                # 2. Check for anaphoric project references ("its tests", "تستهاشو", "پروژه‌اش", "درستش کن")
+                # 2. Check for anaphoric project references ("its tests", "تستهاشو", "پروژه‌اش", "درستش کن", "open it in VS Code", "بازش کن")
                 has_anaphora = any(
                     re.search(p, resolved_text, re.IGNORECASE)
                     for p in (
-                        r"\b(its\s+(?:tests?|code|backend|repo)|check\s+it|fix\s+it)\b",
-                        r"(?:تست[‌\s]*هاشو|کدشو|درستش\s*کن|بررسیش\s*کن|همون\s*پروژه|پروژه‌اش|پروژش)",
+                        r"\b(its\s+(?:tests?|code|backend|repo)|check\s+it|fix\s+it|open\s+it(?:\s+in\s+[a-zA-Z0-9_\s]+)?)\b",
+                        r"(?:تست[‌\s]*هاشو|کدشو|درستش\s*کن|بررسیش\s*کن|همون\s*پروژه|پروژه‌اش|پروژش|بازش\s*کن|توی\s+.+?\s*بازش\s*کن)",
                     )
                 )
                 if has_anaphora and session.active_project_name:
@@ -352,6 +525,20 @@ class ConversationSessionManager:
                     logger.info(
                         f"Resolved anaphoric reference to active project: '{session.active_project_name}'"
                     )
+                    # If goal is "open it in <editor>", enrich the goal text
+                    if re.search(r"\bopen\s+it\b", resolved_text, re.IGNORECASE):
+                        resolved_text = re.sub(
+                            r"\bopen\s+it\b",
+                            f"open {session.active_project_name} project",
+                            resolved_text,
+                            flags=re.IGNORECASE,
+                        )
+                    elif re.search(r"بازش\s*کن", resolved_text):
+                        resolved_text = re.sub(
+                            r"بازش\s*کن",
+                            f"پروژه {session.active_project_name} رو باز کن",
+                            resolved_text,
+                        )
 
             # 3. Check for specific application references
             app_map = {

@@ -1,1 +1,10 @@
-[]
+[
+  {
+    "directory_id": "e3e0ae5c-a784-497b-aaaa-a0836d3c29a2",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\pytest-of-ARAD\\pytest-479\\test_cert_power_approval_paths0\\authorized_docs",
+    "display_name": "authorized_docs",
+    "read_only": true,
+    "enabled": true,
+    "created_at": "2026-11-17T15:22:54.786004+00:00"
+  }
+]

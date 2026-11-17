@@ -299,7 +299,9 @@ class PathSecurityService:
         """Check if file text contains unencrypted private key markers."""
         return any(marker in text for marker in self.PRIVATE_KEY_MARKERS)
 
-    def validate_and_resolve_path(self, requested_path: str, operation: str = "write") -> Path:
+    def validate_and_resolve_path(
+        self, requested_path: str | Path, operation: str = "write"
+    ) -> Path:
         """Strictly validate that requested_path resides within an authorized directory.
 
         Protects against:
@@ -313,19 +315,21 @@ class PathSecurityService:
           are blocked under Strict Default-Deny unless Desktop is authorized or the operation
           is explicitly scoped.
         """
+        req_str = str(requested_path)
+
         # 1. Reject Alternate Data Streams and null bytes
-        if ":" in Path(requested_path).name or "\x00" in requested_path:
+        if ":" in Path(req_str).name or "\x00" in req_str:
             raise PermissionError(
                 "Access denied: Invalid path syntax or Alternate Data Stream detected."
             )
 
         # 2. Reject UNC / network share paths
-        if requested_path.startswith(r"\\") or requested_path.startswith("//"):
+        if req_str.startswith(r"\\") or req_str.startswith("//"):
             raise PermissionError("Access denied: Network shares and UNC paths are prohibited.")
 
         # 3. Canonicalize and resolve real path
         try:
-            target_path = Path(requested_path).resolve()
+            target_path = Path(req_str).resolve()
         except Exception as exc:
             raise PermissionError(f"Access denied: Malformed target path: {exc}") from exc
 
@@ -342,40 +346,50 @@ class PathSecurityService:
             except ValueError:
                 continue
 
-        # If not inside an already authorized directory, check if target_path is within the user's Desktop.
-        # Explicit user requests targeting a file within Desktop boundary are validated for this target operation
-        # only, without silently expanding permanent permissions in authorized_directories.json.
+        # If not inside an already authorized directory, check if target_path is within
+        # standard user libraries (Desktop, Documents, Downloads) for scoped operations.
         if not authorized_root:
-            try:
-                from infrastructure.paths import get_desktop_dir
+            from infrastructure.paths import (
+                get_desktop_dir,
+                get_documents_dir,
+                get_downloads_dir,
+            )
 
-                desktop_dir = get_desktop_dir()
+            known_roots = [
+                ("Desktop", get_desktop_dir()),
+                ("Documents", get_documents_dir()),
+                ("Downloads", get_downloads_dir()),
+            ]
+            for root_name, root_path in known_roots:
                 try:
-                    target_path.relative_to(desktop_dir)
+                    target_path.relative_to(root_path)
                     op_norm = operation.lower()
                     canonical_key = (str(target_path).lower(), op_norm)
                     is_scoped = canonical_key in self._scoped_operations
 
-                    if is_scoped:
-                        authorized_root = desktop_dir
-                    elif op_norm == "write" and not target_path.exists():
-                        # Explicit new file creation targeting Desktop is allowed for that operation only
-                        authorized_root = desktop_dir
+                    if (
+                        is_scoped
+                        or op_norm in ("create_directory", "directory_create", "mkdir")
+                        or op_norm == "write"
+                        and not target_path.exists()
+                    ):
+                        authorized_root = root_path
+                        break
                     elif op_norm == "write" and target_path.exists():
                         raise PermissionError(
-                            f"Access denied: Overwriting existing file '{target_path.name}' on Desktop requires explicit authorization."
+                            f"Access denied: Overwriting existing file '{target_path.name}' in {root_name} requires explicit authorization."
                         )
                     else:
                         raise PermissionError(
-                            f"Access denied: Desktop directory is not authorized for '{operation}' operations under Strict Default-Deny. "
+                            f"Access denied: {root_name} directory is not authorized for '{operation}' operations under Strict Default-Deny. "
                             f"Explicit directory authorization in Settings is required."
                         )
                 except ValueError:
-                    pass
-            except PermissionError:
-                raise
-            except Exception as exc:
-                logger.debug(f"Unable to resolve Desktop path for containment check: {exc}")
+                    continue
+                except PermissionError:
+                    raise
+                except Exception as exc:
+                    logger.debug(f"Unable to resolve {root_name} for containment check: {exc}")
 
         if not authorized_root:
             if not active_dirs:

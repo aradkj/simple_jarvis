@@ -19,11 +19,17 @@ class AgentState(StrEnum):
 
     IDLE = "idle"
     ANALYZING = "analyzing"
+    UNDERSTANDING = "understanding"
+    CONTEXT_RETRIEVAL = "context_retrieval"
+    ENVIRONMENT_DISCOVERY = "environment_discovery"
     PLANNING = "planning"
     PLAN_READY = "plan_ready"
     WAITING_FOR_INPUT = "waiting_for_input"
+    WAITING_FOR_USER = "waiting_for_user"
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     EXECUTING = "executing"
+    VERIFYING = "verifying"
+    RECOVERING = "recovering"
     REPLANNING = "replanning"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -66,14 +72,52 @@ class AgentStateMachine:
     _VALID_TRANSITIONS: dict[AgentState, set[AgentState]] = {
         AgentState.IDLE: {
             AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
+            AgentState.CONTEXT_RETRIEVAL,
+            AgentState.ENVIRONMENT_DISCOVERY,
             AgentState.PLANNING,
             AgentState.EXECUTING,
             AgentState.CANCELLED,
         },
+        AgentState.UNDERSTANDING: {
+            AgentState.CONTEXT_RETRIEVAL,
+            AgentState.ENVIRONMENT_DISCOVERY,
+            AgentState.PLANNING,
+            AgentState.WAITING_FOR_USER,
+            AgentState.WAITING_FOR_INPUT,
+            AgentState.EXECUTING,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
+        AgentState.CONTEXT_RETRIEVAL: {
+            AgentState.ENVIRONMENT_DISCOVERY,
+            AgentState.PLANNING,
+            AgentState.UNDERSTANDING,
+            AgentState.WAITING_FOR_USER,
+            AgentState.WAITING_FOR_INPUT,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
+        AgentState.ENVIRONMENT_DISCOVERY: {
+            AgentState.PLANNING,
+            AgentState.EXECUTING,
+            AgentState.CONTEXT_RETRIEVAL,
+            AgentState.WAITING_FOR_USER,
+            AgentState.WAITING_FOR_INPUT,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
         AgentState.ANALYZING: {
+            AgentState.UNDERSTANDING,
+            AgentState.CONTEXT_RETRIEVAL,
+            AgentState.ENVIRONMENT_DISCOVERY,
             AgentState.PLANNING,
             AgentState.EXECUTING,
             AgentState.WAITING_FOR_INPUT,
+            AgentState.WAITING_FOR_USER,
             AgentState.COMPLETED,
             AgentState.FAILED,
             AgentState.CANCELLED,
@@ -81,8 +125,10 @@ class AgentStateMachine:
         },
         AgentState.PLANNING: {
             AgentState.PLAN_READY,
+            AgentState.ENVIRONMENT_DISCOVERY,
             AgentState.REPLANNING,
             AgentState.WAITING_FOR_INPUT,
+            AgentState.WAITING_FOR_USER,
             AgentState.FAILED,
             AgentState.CANCELLED,
             AgentState.IDLE,
@@ -105,6 +151,16 @@ class AgentStateMachine:
         },
         AgentState.WAITING_FOR_INPUT: {
             AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
+            AgentState.PLANNING,
+            AgentState.EXECUTING,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
+        AgentState.WAITING_FOR_USER: {
+            AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
             AgentState.PLANNING,
             AgentState.EXECUTING,
             AgentState.FAILED,
@@ -113,11 +169,33 @@ class AgentStateMachine:
         },
         AgentState.EXECUTING: {
             AgentState.EXECUTING,  # Step-to-step self-transition
+            AgentState.VERIFYING,
             AgentState.ANALYZING,  # Transition to analyze new goal or prompt
             AgentState.WAITING_FOR_APPROVAL,
             AgentState.WAITING_FOR_INPUT,
+            AgentState.WAITING_FOR_USER,
             AgentState.REPLANNING,
+            AgentState.RECOVERING,
             AgentState.COMPLETED,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
+        AgentState.VERIFYING: {
+            AgentState.COMPLETED,
+            AgentState.EXECUTING,
+            AgentState.RECOVERING,
+            AgentState.REPLANNING,
+            AgentState.FAILED,
+            AgentState.CANCELLED,
+            AgentState.IDLE,
+        },
+        AgentState.RECOVERING: {
+            AgentState.PLANNING,
+            AgentState.EXECUTING,
+            AgentState.VERIFYING,
+            AgentState.REPLANNING,
+            AgentState.WAITING_FOR_USER,
             AgentState.FAILED,
             AgentState.CANCELLED,
             AgentState.IDLE,
@@ -126,6 +204,7 @@ class AgentStateMachine:
             AgentState.PLAN_READY,
             AgentState.EXECUTING,
             AgentState.WAITING_FOR_INPUT,
+            AgentState.WAITING_FOR_USER,
             AgentState.COMPLETED,
             AgentState.FAILED,
             AgentState.CANCELLED,
@@ -134,15 +213,19 @@ class AgentStateMachine:
         AgentState.COMPLETED: {
             AgentState.IDLE,
             AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
         },
         AgentState.FAILED: {
             AgentState.IDLE,
             AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
             AgentState.REPLANNING,
+            AgentState.RECOVERING,
         },
         AgentState.CANCELLED: {
             AgentState.IDLE,
             AgentState.ANALYZING,
+            AgentState.UNDERSTANDING,
         },
     }
 

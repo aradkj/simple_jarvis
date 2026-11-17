@@ -15,6 +15,7 @@ from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
 from memory.repository import MemoryRepository
 from ui.main_window import MainWindow
 from ui.memory_dialog import MemoryCardWidget, MemoryManagementDialog
+from ui.personality_memory_dialog import PersonalityMemoryDialog
 
 
 def test_memory_card_widget_persian_rtl_and_signals(qtbot: QtBot) -> None:
@@ -80,8 +81,11 @@ def test_main_window_has_memory_button_and_opens_dialog(qtbot: QtBot, tmp_path: 
     qtbot.addWidget(win)
 
     assert hasattr(win, "memory_btn")
-    assert win.memory_btn.text() == "🧠 Memory"
+    assert "Memory" in win.memory_btn.text()
 
-    with patch.object(MemoryManagementDialog, "exec", return_value=0) as mock_exec:
+    with (
+        patch.object(PersonalityMemoryDialog, "exec", return_value=0) as mock_exec_p,
+        patch.object(MemoryManagementDialog, "exec", return_value=0) as mock_exec_m,
+    ):
         qtbot.mouseClick(win.memory_btn, Qt.MouseButton.LeftButton)
-        mock_exec.assert_called_once()
+        assert mock_exec_p.called or mock_exec_m.called

@@ -63,6 +63,7 @@ from tools.filesystem import (
     FileArchiveInspectTool,
     FileCompareDiffTool,
     FileCopyTool,
+    FileCreateDirectoryTool,
     FileDeleteTool,
     FileDocumentExtractTool,
     FileEditTextTool,
@@ -73,6 +74,10 @@ from tools.filesystem import (
     FileSearchTextTool,
     FileWriteTextTool,
     get_path_security_service,
+)
+from tools.internet import (
+    InternetPageReadTool,
+    InternetSearchTool,
 )
 from tools.mock_tools import (
     MockCalculatorTool,
@@ -97,6 +102,10 @@ from tools.voice import (
     VoiceSpeakTool,
     VoiceStatusTool,
 )
+from tools.weather import (
+    WeatherCurrentTool,
+    WeatherForecastTool,
+)
 from tools.windows import (
     WindowsAppCloseTool,
     WindowsAppLaunchTool,
@@ -104,6 +113,7 @@ from tools.windows import (
     WindowsAudioGetStatusTool,
     WindowsAudioSetMuteTool,
     WindowsAudioSetVolumeTool,
+    WindowsDesktopScreenshotTool,
     WindowsDisplayGetBrightnessTool,
     WindowsDisplaySetBrightnessTool,
     WindowsPowerGetStatusTool,
@@ -154,6 +164,7 @@ class JARVISAgent:
                     PermissionCategory.WINDOWS_DISPLAY_READ,
                     PermissionCategory.WINDOWS_DISPLAY_CONTROL,
                     PermissionCategory.WINDOWS_POWER_READ,
+                    PermissionCategory.WINDOWS_OPERATION,
                 }
             )
             if getattr(self.settings, "windows_audio_control_enabled", True):
@@ -282,6 +293,19 @@ class JARVISAgent:
             except Exception as v_exc:
                 logger.warning(f"Voice pipeline initialization bypassed: {v_exc}")
 
+        # Phase 11 Persian & Bilingual Intelligence Processor
+        from core.persian import PersianLanguageProcessor
+
+        self.persian_processor: PersianLanguageProcessor = PersianLanguageProcessor()
+
+        # Universal Integration Hub
+        try:
+            from integrations.hub import initialize_default_integrations
+
+            self.integration_hub = initialize_default_integrations()
+        except Exception as itg_exc:
+            logger.warning(f"Integration Hub initialization bypassed: {itg_exc}")
+
         # Register standard simulated mock tools and Phase 4 real tools
         self._register_default_tools()
 
@@ -297,23 +321,42 @@ class JARVISAgent:
         try:
             outcome = self.process_agent_task(goal=text, session_id=self._active_session_id)
             if self.voice_pipeline and outcome.final_response:
+                import re
+
+                from tools.voice.voice_pipeline import clean_text_for_speech
+
                 policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
                 explicit_fa = JarvisPersonalityEngine.detect_explicit_persian_request(text)
                 if explicit_fa or policy == "PERSIAN":
-                    spoken_text = outcome.final_response
+                    spoken_text = clean_text_for_speech(outcome.final_response)
                 else:
-                    spoken_text = JarvisPersonalityEngine.format_spoken_response_en(
-                        text=outcome.final_response,
-                        user_prompt=text,
+                    is_persian_response = bool(
+                        re.search(
+                            r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", outcome.final_response
+                        )
                     )
+                    if is_persian_response:
+                        spoken_text = JarvisPersonalityEngine.format_spoken_response_en(
+                            text=outcome.final_response,
+                            user_prompt=text,
+                        )
+                    else:
+                        spoken_text = clean_text_for_speech(outcome.final_response)
+                    from core.personality import filter_english_speech_only
+
+                    spoken_text = filter_english_speech_only(spoken_text)
                 self.voice_pipeline.speak(spoken_text)
         except Exception as exc:
             logger.error(f"Spoken command execution failed: {exc}")
 
     def _register_default_tools(self) -> None:
         """Register deterministic mock tools and Phase 4 Windows system/file inspection tools."""
-        # 1. Phase 3 Deterministic Mocks
+        # 1. Phase 3 Deterministic Mocks & Live Core Tools
         default_tools: list[BaseTool] = [
+            WeatherCurrentTool(),
+            WeatherForecastTool(),
+            InternetSearchTool(),
+            InternetPageReadTool(),
             MockSearchTool(),
             MockCalculatorTool(),
             MockWeatherTool(),
@@ -382,6 +425,7 @@ class JARVISAgent:
                     [
                         WindowsDisplayGetBrightnessTool(),
                         WindowsDisplaySetBrightnessTool(),
+                        WindowsDesktopScreenshotTool(),
                     ]
                 )
 
@@ -456,6 +500,7 @@ class JARVISAgent:
         if getattr(self.settings, "file_modification_enabled", True):
             default_tools.extend(
                 [
+                    FileCreateDirectoryTool(),
                     FileWriteTextTool(),
                     FileEditTextTool(),
                     FileCopyTool(),
@@ -516,6 +561,26 @@ class JARVISAgent:
                     WhatsAppStatusTool(),
                 ]
             )
+
+        # 12. File Intelligence Subsystem Tools
+        try:
+            from core.files.file_tools import (
+                FileIndexSyncTool,
+                FileInspectTool,
+                FileOpenTool,
+                FileSearchTool,
+            )
+
+            default_tools.extend(
+                [
+                    FileSearchTool(),
+                    FileOpenTool(),
+                    FileInspectTool(),
+                    FileIndexSyncTool(),
+                ]
+            )
+        except Exception as fi_err:
+            logger.warning(f"Failed to load File Intelligence tools: {fi_err}")
 
         for tool in default_tools:
             with contextlib.suppress(Exception):
@@ -728,6 +793,14 @@ class JARVISAgent:
             goal, history, session_id=active_session
         )
 
+        # Propagate Persian Understanding and Safety Constraints to Execution Context
+        if inferred.get("read_only"):
+            ctx.metadata["read_only"] = True
+        if inferred.get("prohibitions"):
+            ctx.metadata["prohibited_actions"] = inferred.get("prohibitions")
+        if inferred.get("persian_understanding"):
+            ctx.metadata["persian_understanding"] = inferred.get("persian_understanding")
+
         # Phase 10: Persistent Unified Task Orchestration Checkpoint
         orchestrated_task = self.task_orchestrator.create_task(
             goal=resolved_goal,
@@ -744,6 +817,36 @@ class JARVISAgent:
             TaskLifecycleState.UNDERSTANDING,
             reason="Analyzing user intent and resolving conversational context",
         )
+
+        # Permanent Personal Identity & Memory Fast-Path (Store, Query, Forget)
+        try:
+            from core.memory import ConversationalMemoryProcessor
+
+            is_fa = bool(
+                inferred.get("explicit_persian_requested", False)
+                or getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
+                == "PERSIAN"
+            )
+            mem_proc = ConversationalMemoryProcessor()
+            mem_result = mem_proc.process(goal, is_persian_response=is_fa)
+            if mem_result.is_memory_command and mem_result.executed_successfully:
+                self.state_machine.transition_to(
+                    AgentState.COMPLETED, reason="Personal memory command executed"
+                )
+                self.task_orchestrator.transition_task(
+                    orchestrated_task.task_id,
+                    TaskLifecycleState.COMPLETED,
+                    reason=f"Memory command {mem_result.action_type.value} resolved",
+                )
+                plan = Plan(goal=resolved_goal, session_id=active_session)
+                return ExecutionOutcome(
+                    status="completed",
+                    plan=plan,
+                    final_response=mem_result.response_text,
+                    steps_executed=0,
+                )
+        except Exception as mem_err:
+            logger.debug(f"Conversational memory intercept note: {mem_err}")
 
         # Phase 10 Security Boundary: Hypothetical Discussion Protection
         # Never formulate or execute destructive tools from speculative/hypothetical exploration

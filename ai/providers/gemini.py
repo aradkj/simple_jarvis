@@ -45,6 +45,18 @@ DEFAULT_SYSTEM_INSTRUCTION = (
     "respectful phrasing."
 )
 
+DEFAULT_GEMINI_STRENGTH_TIERS: list[str] = [
+    "gemini-2.5-pro",
+    "gemini-3.8-flash",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+]
+
 
 class GeminiProviderError(AIProviderError):
     """Base exception for Gemini provider errors."""
@@ -99,6 +111,8 @@ def _interruptible_sleep(duration_sec: float, token: CancellationToken | None = 
 class GeminiProvider(BaseAIProvider):
     """Google Gemini AI Provider integrating the official google-genai SDK."""
 
+    _model_cooldowns: dict[str, float] = {}
+
     def __init__(
         self,
         settings: Settings | None = None,
@@ -106,6 +120,77 @@ class GeminiProvider(BaseAIProvider):
     ) -> None:
         self.settings = settings or get_settings()
         self._client: genai.Client | None = client
+
+    @classmethod
+    def mark_model_cooldown(cls, model_id: str, duration_seconds: float = 60.0) -> None:
+        """Mark a Gemini model in temporary cooldown due to high demand, rate limits, or errors."""
+        norm_model = model_id.lower().strip()
+        expires_at = time.time() + duration_seconds
+        cls._model_cooldowns[norm_model] = expires_at
+        logger.info(
+            f"Marked Gemini model '{norm_model}' in cooldown for {duration_seconds:.0f}s (until {expires_at:.1f})"
+        )
+
+    @classmethod
+    def is_model_in_cooldown(cls, model_id: str) -> bool:
+        """Check if a Gemini model is currently in cooldown."""
+        norm_model = model_id.lower().strip()
+        expires_at = cls._model_cooldowns.get(norm_model, 0.0)
+        return time.time() < expires_at
+
+    @classmethod
+    def reset_model_cooldowns(cls) -> None:
+        """Clear all active model cooldowns."""
+        cls._model_cooldowns.clear()
+        logger.info("Cleared all Gemini model cooldowns.")
+
+    def get_fallback_hierarchy(self) -> list[str]:
+        """Return the prioritized list of Gemini models from strongest to fastest."""
+        configured_order = getattr(self.settings, "gemini_model_fallback_order", None)
+        if configured_order and isinstance(configured_order, list):
+            return list(configured_order)
+        return list(DEFAULT_GEMINI_STRENGTH_TIERS)
+
+    def get_strongest_available_model(self, preferred_model: str | None = None) -> str:
+        """Return the strongest available Gemini model that is not currently in cooldown."""
+        hierarchy = self.get_fallback_hierarchy()
+
+        for cand in hierarchy:
+            if not self.is_model_in_cooldown(cand):
+                return cand
+
+        if self._model_cooldowns:
+            earliest = min(
+                hierarchy, key=lambda m: self._model_cooldowns.get(m.lower().strip(), 0.0)
+            )
+            return earliest
+
+        return preferred_model or self.settings.gemini_model
+
+    def get_model_failover_sequence(self, start_model: str | None = None) -> list[str]:
+        """
+        Return the ordered sequence of Gemini models to attempt, prioritizing strongest available.
+        Models in cooldown are placed at the end or omitted.
+        """
+        hierarchy = self.get_fallback_hierarchy()
+        sequence: list[str] = []
+
+        if start_model and start_model in hierarchy:
+            if not self.is_model_in_cooldown(start_model):
+                sequence.append(start_model)
+            for m in hierarchy:
+                if m != start_model and m not in sequence and not self.is_model_in_cooldown(m):
+                    sequence.append(m)
+        else:
+            for m in hierarchy:
+                if not self.is_model_in_cooldown(m):
+                    sequence.append(m)
+
+        for m in hierarchy:
+            if m not in sequence:
+                sequence.append(m)
+
+        return sequence
 
     @property
     def provider_name(self) -> str:
@@ -117,6 +202,8 @@ class GeminiProvider(BaseAIProvider):
 
     @property
     def default_model(self) -> str:
+        if getattr(self.settings, "gemini_auto_model_selection", False):
+            return self.get_strongest_available_model(self.settings.gemini_model)
         return self.settings.gemini_model
 
     def list_supported_models(self) -> list[ModelInfo]:
@@ -158,7 +245,7 @@ class GeminiProvider(BaseAIProvider):
         return ProviderStatus.NOT_CONFIGURED
 
     def test_connection(self) -> ConnectionTestResult:
-        """Perform a minimal live ping request to verify model access and credentials."""
+        """Perform a minimal live ping request to verify model access and credentials with auto failover."""
         if not self.is_ready():
             return ConnectionTestResult(
                 is_success=False,
@@ -167,111 +254,133 @@ class GeminiProvider(BaseAIProvider):
             )
 
         start_time = time.perf_counter()
-        try:
-            client = self._get_client()
-            # Enforce application safety deadline minimum of 10s (10,000ms)
-            timeout_ms = max(10000, int(self.settings.gemini_request_timeout * 1000))
-            cfg = types.GenerateContentConfig(
-                max_output_tokens=5,
-                temperature=0.0,
-                http_options=types.HttpOptions(timeout=timeout_ms),
-            )
-            # Lightweight verification ping
-            response = client.models.generate_content(
-                model=self.settings.gemini_model,
-                contents="ping",
-                config=cfg,
-            )
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        auto_select = getattr(self.settings, "gemini_auto_model_selection", True)
+        models_to_test = (
+            self.get_model_failover_sequence() if auto_select else [self.settings.gemini_model]
+        )
+        primary_model = models_to_test[0] if models_to_test else self.settings.gemini_model
 
-            if response and (response.text is not None or response.candidates):
-                return ConnectionTestResult(
-                    is_success=True,
-                    message=f"Connected successfully to {self.settings.gemini_model}.",
-                    error_type=ConnectionErrorType.SUCCESS,
-                    latency_ms=round(elapsed_ms, 1),
+        for idx, test_model in enumerate(models_to_test):
+            try:
+                client = self._get_client()
+                # Enforce application safety deadline minimum of 10s (10,000ms)
+                timeout_ms = max(10000, int(self.settings.gemini_request_timeout * 1000))
+                cfg = types.GenerateContentConfig(
+                    max_output_tokens=5,
+                    temperature=0.0,
+                    http_options=types.HttpOptions(timeout=timeout_ms),
                 )
-            return ConnectionTestResult(
-                is_success=False,
-                error_type=ConnectionErrorType.UNKNOWN_ERROR,
-                message="Received empty response from Gemini endpoint.",
-                latency_ms=round(elapsed_ms, 1),
-            )
+                response = client.models.generate_content(
+                    model=test_model,
+                    contents="ping",
+                    config=cfg,
+                )
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
 
-        except errors.ClientError as err:
-            err_str = str(err)
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            # Distinguish 403 Permission / Forbidden vs 400/401 Invalid Key
-            if err.code == 403 or "permission" in err_str.lower():
-                return ConnectionTestResult(
-                    is_success=False,
-                    error_type=ConnectionErrorType.AUTH_FAILURE,
-                    message="Access forbidden (403). Ensure Generative Language API is enabled on your project.",
-                    latency_ms=round(elapsed_ms, 1),
-                )
-            if "API_KEY_INVALID" in err_str or err.code in (400, 401):
-                return ConnectionTestResult(
-                    is_success=False,
-                    error_type=ConnectionErrorType.INVALID_API_KEY,
-                    message="Invalid or unauthorized Gemini API key. Verify your credentials.",
-                    latency_ms=round(elapsed_ms, 1),
-                )
-            if err.code == 404 or "not found" in err_str.lower():
-                return ConnectionTestResult(
-                    is_success=False,
-                    error_type=ConnectionErrorType.MODEL_NOT_FOUND,
-                    message=f"Model '{self.settings.gemini_model}' was not found or is discontinued. Please switch to 'gemini-3.5-flash-lite' in Settings.",
-                    latency_ms=round(elapsed_ms, 1),
-                )
-            if err.code == 429 or "RESOURCE_EXHAUSTED" in err_str:
+                if response and (response.text is not None or response.candidates):
+                    if test_model != primary_model:
+                        msg = f"Connected successfully to {test_model} (auto failover from {primary_model})."
+                    else:
+                        msg = f"Connected successfully to {test_model}."
+                    return ConnectionTestResult(
+                        is_success=True,
+                        message=msg,
+                        error_type=ConnectionErrorType.SUCCESS,
+                        latency_ms=round(elapsed_ms, 1),
+                    )
+
+            except errors.ServerError as err:
+                if auto_select and idx < len(models_to_test) - 1:
+                    cooldown = getattr(self.settings, "failover_cooldown_seconds", 60.0)
+                    self.mark_model_cooldown(test_model, cooldown)
+                    continue
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                msg = str(err)
+                if err.code == 503 or "demand" in msg.lower() or "unavailable" in msg.lower():
+                    server_msg = (
+                        f"Model '{test_model}' is temporarily overloaded (503 high demand). "
+                        "Please switch to 'gemini-3.5-flash' in Settings or try again shortly."
+                    )
+                else:
+                    server_msg = f"Google Gemini server-side error (code {err.code}): {err}"
                 return ConnectionTestResult(
                     is_success=False,
-                    error_type=ConnectionErrorType.QUOTA_EXCEEDED,
-                    message="Gemini API rate limit or quota exceeded. Please try again later.",
+                    error_type=ConnectionErrorType.SERVER_ERROR,
+                    message=server_msg,
                     latency_ms=round(elapsed_ms, 1),
                 )
-            return ConnectionTestResult(
-                is_success=False,
-                error_type=ConnectionErrorType.UNKNOWN_ERROR,
-                message=f"Client request error: {err_str}",
-                latency_ms=round(elapsed_ms, 1),
-            )
 
-        except errors.ServerError as err:
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            msg = str(err)
-            if err.code == 503 or "demand" in msg.lower() or "unavailable" in msg.lower():
-                server_msg = (
-                    f"Model '{self.settings.gemini_model}' is temporarily overloaded (503 high demand). "
-                    f"Please switch to 'gemini-3.5-flash-lite' in Settings or try again shortly."
+            except errors.ClientError as err:
+                if auto_select and err.code in (404, 429) and idx < len(models_to_test) - 1:
+                    cooldown = getattr(self.settings, "failover_cooldown_seconds", 60.0)
+                    self.mark_model_cooldown(test_model, cooldown)
+                    continue
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                err_str = str(err)
+                if err.code == 403 or "permission" in err_str.lower():
+                    return ConnectionTestResult(
+                        is_success=False,
+                        error_type=ConnectionErrorType.AUTH_FAILURE,
+                        message="Access forbidden (403). Ensure Generative Language API is enabled on your project.",
+                        latency_ms=round(elapsed_ms, 1),
+                    )
+                if "API_KEY_INVALID" in err_str or err.code in (400, 401):
+                    return ConnectionTestResult(
+                        is_success=False,
+                        error_type=ConnectionErrorType.INVALID_API_KEY,
+                        message="Invalid or unauthorized Gemini API key. Verify your credentials.",
+                        latency_ms=round(elapsed_ms, 1),
+                    )
+                if err.code == 404 or "not found" in err_str.lower():
+                    return ConnectionTestResult(
+                        is_success=False,
+                        error_type=ConnectionErrorType.MODEL_NOT_FOUND,
+                        message=f"Model '{test_model}' was not found or is discontinued.",
+                        latency_ms=round(elapsed_ms, 1),
+                    )
+                if err.code == 429 or "RESOURCE_EXHAUSTED" in err_str:
+                    return ConnectionTestResult(
+                        is_success=False,
+                        error_type=ConnectionErrorType.QUOTA_EXCEEDED,
+                        message="Gemini API rate limit or quota exceeded. Please try again later.",
+                        latency_ms=round(elapsed_ms, 1),
+                    )
+                return ConnectionTestResult(
+                    is_success=False,
+                    error_type=ConnectionErrorType.UNKNOWN_ERROR,
+                    message=f"Client request error on '{test_model}': {err_str}",
+                    latency_ms=round(elapsed_ms, 1),
                 )
-            else:
-                server_msg = f"Google Gemini server-side error (code {err.code}). Google servers may be temporarily experiencing issues."
-            return ConnectionTestResult(
-                is_success=False,
-                error_type=ConnectionErrorType.SERVER_ERROR,
-                message=server_msg,
-                latency_ms=round(elapsed_ms, 1),
-            )
 
-        except (TimeoutError, ConnectionResetError) as err:
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            return ConnectionTestResult(
-                is_success=False,
-                error_type=ConnectionErrorType.TIMEOUT,
-                message=f"Connection timed out: {err}",
-                latency_ms=round(elapsed_ms, 1),
-            )
+            except (TimeoutError, ConnectionResetError) as err:
+                if auto_select and idx < len(models_to_test) - 1:
+                    cooldown = getattr(self.settings, "failover_cooldown_seconds", 60.0)
+                    self.mark_model_cooldown(test_model, cooldown)
+                    continue
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                return ConnectionTestResult(
+                    is_success=False,
+                    error_type=ConnectionErrorType.TIMEOUT,
+                    message=f"Connection timed out: {err}",
+                    latency_ms=round(elapsed_ms, 1),
+                )
 
-        except Exception as exc:
-            elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            exc_name = exc.__class__.__name__
-            return ConnectionTestResult(
-                is_success=False,
-                error_type=ConnectionErrorType.NETWORK_ERROR,
-                message=f"Network connection error ({exc_name}). Check your internet connection or proxy/VPN.",
-                latency_ms=round(elapsed_ms, 1),
-            )
+            except Exception as exc:
+                elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                exc_name = exc.__class__.__name__
+                return ConnectionTestResult(
+                    is_success=False,
+                    error_type=ConnectionErrorType.NETWORK_ERROR,
+                    message=f"Network connection error ({exc_name}). Check your internet connection or proxy/VPN.",
+                    latency_ms=round(elapsed_ms, 1),
+                )
+
+        return ConnectionTestResult(
+            is_success=False,
+            error_type=ConnectionErrorType.SERVER_ERROR,
+            message="All tested Gemini models were unavailable.",
+            latency_ms=round((time.perf_counter() - start_time) * 1000.0, 1),
+        )
 
     def _build_contents(
         self,
@@ -321,8 +430,9 @@ class GeminiProvider(BaseAIProvider):
             http_options=types.HttpOptions(timeout=timeout_ms),
         )
 
-    def _map_exception(self, exc: Exception) -> GeminiProviderError:
+    def _map_exception(self, exc: Exception, model: str | None = None) -> GeminiProviderError:
         """Translate raw SDK or network exceptions into typed GeminiProviderErrors."""
+        target_model = model or self.settings.gemini_model
         if isinstance(exc, errors.ClientError):
             msg = str(exc)
             if exc.code == 403 or "permission" in msg.lower():
@@ -335,30 +445,34 @@ class GeminiProvider(BaseAIProvider):
                 )
             if exc.code == 404 or "not found" in msg.lower():
                 return GeminiModelNotFoundError(
-                    f"Model '{self.settings.gemini_model}' was not found or is unavailable."
+                    f"Model '{target_model}' was not found or is unavailable."
                 )
             if exc.code == 429 or "RESOURCE_EXHAUSTED" in msg:
                 return GeminiQuotaExceededError("Gemini API quota or rate limit exceeded.")
-            return GeminiProviderError(f"Gemini client request error (code {exc.code})")
+            return GeminiProviderError(
+                f"Gemini client request error (code {exc.code}) on '{target_model}'"
+            )
 
         if isinstance(exc, errors.ServerError):
             msg = str(exc)
             if exc.code == 503 or "demand" in msg.lower() or "unavailable" in msg.lower():
                 return GeminiServerError(
-                    f"Google Gemini model '{self.settings.gemini_model}' is currently overloaded (code 503: high demand). "
+                    f"Google Gemini model '{target_model}' is currently overloaded (code 503: high demand). "
                     "Please switch model to 'gemini-3.5-flash' in Settings or try again shortly."
                 )
-            return GeminiServerError(f"Google Gemini server error (code {exc.code}).")
+            return GeminiServerError(
+                f"Google Gemini server error (code {exc.code}) on '{target_model}'."
+            )
 
         if isinstance(exc, TimeoutError):
-            return GeminiTimeoutError("Request to Gemini API timed out.")
+            return GeminiTimeoutError(f"Request to Gemini API timed out on '{target_model}'.")
 
         if isinstance(exc, (ConnectionError, OSError)):
             return GeminiNetworkError(
-                f"Network error communicating with Gemini: {exc.__class__.__name__}"
+                f"Network error communicating with Gemini ({target_model}): {exc.__class__.__name__}"
             )
 
-        return GeminiProviderError(f"Gemini API operation failed: {exc}")
+        return GeminiProviderError(f"Gemini API operation failed on '{target_model}': {exc}")
 
     def generate_text(
         self,
@@ -367,30 +481,42 @@ class GeminiProvider(BaseAIProvider):
         cancellation_token: CancellationToken | None = None,
         **kwargs: Any,
     ) -> AIResponse:
-        """Generate a complete text response from Gemini model."""
+        """Generate a complete text response from Gemini model with automatic strongest model selection and fast failover."""
         if cancellation_token and cancellation_token.is_cancelled():
             raise GeminiCancelledError("Operation cancelled before invocation.")
-
-        model = kwargs.get("model") or self.settings.gemini_model
-        if ModelCatalog.is_model_retired(self.provider_id, model):
-            logger.warning(
-                "Model '%s' is marked RETIRED by Google. Please select an active model.",
-                model,
-            )
 
         client = self._get_client()
         contents = self._build_contents(prompt, history)
         config = self._build_config(**kwargs)
 
-        # Bounded retry for transient failures
-        max_retries = 2
-        for attempt in range(max_retries + 1):
+        requested_model = kwargs.get("model")
+        auto_select = getattr(self.settings, "gemini_auto_model_selection", True)
+
+        if auto_select:
+            failover_candidates = self.get_model_failover_sequence(start_model=requested_model)
+        else:
+            failover_candidates = [requested_model or self.settings.gemini_model]
+
+        initial_model = (
+            failover_candidates[0] if failover_candidates else self.settings.gemini_model
+        )
+        last_error: Exception | None = None
+
+        for idx, cand_model in enumerate(failover_candidates):
             if cancellation_token and cancellation_token.is_cancelled():
-                raise GeminiCancelledError("Operation cancelled before retry.")
+                raise GeminiCancelledError("Operation cancelled before attempt.")
+
+            if ModelCatalog.is_model_retired(self.provider_id, cand_model):
+                logger.warning(
+                    "Model '%s' is marked RETIRED by Google. Skipping.",
+                    cand_model,
+                )
+                continue
 
             try:
+                logger.debug(f"Attempting Gemini generation with model '{cand_model}'...")
                 response = client.models.generate_content(
-                    model=model,
+                    model=cand_model,
                     contents=contents,
                     config=config,
                 )
@@ -399,26 +525,90 @@ class GeminiProvider(BaseAIProvider):
                 if response.candidates and response.candidates[0].finish_reason:
                     finish_reason = str(response.candidates[0].finish_reason)
 
+                meta = {"model": cand_model}
+                if cand_model != initial_model:
+                    meta["gemini_auto_failover"] = True
+                    meta["original_model"] = initial_model
+                    meta["actual_model"] = cand_model
+                    logger.info(
+                        f"Gemini auto-failover successful: switched from '{initial_model}' to '{cand_model}'"
+                    )
+
                 return AIResponse(
                     text=generated_text,
                     raw_response=response,
                     finish_reason=finish_reason,
-                    model=model,
+                    model=cand_model,
                     provider_id=self.provider_id,
+                    metadata=meta,
                 )
+
             except Exception as exc:
-                typed_err = self._map_exception(exc)
-                if (
-                    isinstance(typed_err, (GeminiServerError, GeminiNetworkError))
-                    and attempt < max_retries
-                ):
-                    backoff = (attempt + 1) * 1.0
-                    logger.warning(f"Transient error ({typed_err}); retrying in {backoff}s...")
-                    _interruptible_sleep(backoff, cancellation_token)
+                last_error = exc
+                typed_err = self._map_exception(exc, model=cand_model)
+
+                if cancellation_token and cancellation_token.is_cancelled():
+                    raise GeminiCancelledError("Operation cancelled during request.") from exc
+
+                is_failoverable = isinstance(
+                    typed_err,
+                    (
+                        GeminiServerError,
+                        GeminiQuotaExceededError,
+                        GeminiModelNotFoundError,
+                        GeminiTimeoutError,
+                        GeminiNetworkError,
+                    ),
+                )
+
+                if auto_select and is_failoverable and idx < len(failover_candidates) - 1:
+                    cooldown_sec = getattr(self.settings, "failover_cooldown_seconds", 60.0)
+                    self.mark_model_cooldown(cand_model, cooldown_sec)
+                    next_model = failover_candidates[idx + 1]
+                    logger.warning(
+                        f"Gemini model '{cand_model}' failed ({typed_err}). "
+                        f"Fast failover to next strongest model '{next_model}'..."
+                    )
                     continue
+
+                if not auto_select:
+                    max_retries = 2
+                    for attempt in range(1, max_retries + 1):
+                        if cancellation_token and cancellation_token.is_cancelled():
+                            raise GeminiCancelledError(
+                                "Operation cancelled before retry."
+                            ) from None
+                        if isinstance(typed_err, (GeminiServerError, GeminiNetworkError)):
+                            backoff = attempt * 1.0
+                            logger.warning(
+                                f"Transient error ({typed_err}); retrying in {backoff}s..."
+                            )
+                            _interruptible_sleep(backoff, cancellation_token)
+                            try:
+                                resp = client.models.generate_content(
+                                    model=cand_model,
+                                    contents=contents,
+                                    config=config,
+                                )
+                                return AIResponse(
+                                    text=resp.text or "",
+                                    raw_response=resp,
+                                    model=cand_model,
+                                    provider_id=self.provider_id,
+                                )
+                            except Exception as retry_exc:
+                                typed_err = self._map_exception(retry_exc, model=cand_model)
+                                last_error = retry_exc
+                                continue
+                        break
+
                 raise typed_err from exc
 
-        raise GeminiProviderError("Failed to generate text after retries.")
+        if last_error:
+            raise self._map_exception(
+                last_error, model=failover_candidates[-1] if failover_candidates else None
+            )
+        raise GeminiProviderError("Failed to generate text: all Gemini models exhausted.")
 
     def stream_text(
         self,
@@ -427,16 +617,9 @@ class GeminiProvider(BaseAIProvider):
         cancellation_token: CancellationToken | None = None,
         **kwargs: Any,
     ) -> Iterator[str]:
-        """Stream text tokens as they are produced by Gemini."""
+        """Stream text tokens as they are produced by Gemini with fast failover on connection/handshake."""
         if cancellation_token and cancellation_token.is_cancelled():
             raise GeminiCancelledError("Operation cancelled before streaming started.")
-
-        model = kwargs.get("model") or self.settings.gemini_model
-        if ModelCatalog.is_model_retired(self.provider_id, model):
-            logger.warning(
-                "Model '%s' is marked RETIRED by Google. Please select an active model.",
-                model,
-            )
 
         client = self._get_client()
         contents = self._build_contents(prompt, history)
@@ -452,31 +635,73 @@ class GeminiProvider(BaseAIProvider):
         if cancellation_token:
             cancellation_token.register_callback(_abort_connection)
 
-        try:
-            stream = client.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=config,
-            )
+        requested_model = kwargs.get("model")
+        auto_select = getattr(self.settings, "gemini_auto_model_selection", True)
 
-            for chunk in stream:
-                if cancellation_token and cancellation_token.is_cancelled():
-                    logger.info("Generation streaming cancelled by user token.")
-                    raise GeminiCancelledError("Generation cancelled by user.")
+        if auto_select:
+            failover_candidates = self.get_model_failover_sequence(start_model=requested_model)
+        else:
+            failover_candidates = [requested_model or self.settings.gemini_model]
 
-                chunk_text = chunk.text
-                if chunk_text:
-                    yield chunk_text
-
-        except GeminiCancelledError:
-            raise
-        except Exception as exc:
+        for idx, cand_model in enumerate(failover_candidates):
             if cancellation_token and cancellation_token.is_cancelled():
-                logger.info("Stream interrupted due to user cancellation.")
-                raise GeminiCancelledError("Generation cancelled by user.") from exc
-            typed_err = self._map_exception(exc)
-            logger.error(f"Error during streaming generation: {typed_err}")
-            raise typed_err from exc
+                raise GeminiCancelledError("Operation cancelled before streaming started.")
+
+            if ModelCatalog.is_model_retired(self.provider_id, cand_model):
+                continue
+
+            try:
+                stream = client.models.generate_content_stream(
+                    model=cand_model,
+                    contents=contents,
+                    config=config,
+                )
+                stream_iter = iter(stream)
+                try:
+                    first_chunk = next(stream_iter, None)
+                except StopIteration:
+                    return
+
+                if first_chunk and first_chunk.text:
+                    yield first_chunk.text
+
+                for chunk in stream_iter:
+                    if cancellation_token and cancellation_token.is_cancelled():
+                        logger.info("Generation streaming cancelled by user token.")
+                        raise GeminiCancelledError("Generation cancelled by user.")
+                    if chunk.text:
+                        yield chunk.text
+                return
+
+            except GeminiCancelledError:
+                raise
+            except Exception as exc:
+                if cancellation_token and cancellation_token.is_cancelled():
+                    raise GeminiCancelledError("Generation cancelled by user.") from exc
+
+                typed_err = self._map_exception(exc, model=cand_model)
+                is_failoverable = isinstance(
+                    typed_err,
+                    (
+                        GeminiServerError,
+                        GeminiQuotaExceededError,
+                        GeminiModelNotFoundError,
+                        GeminiTimeoutError,
+                        GeminiNetworkError,
+                    ),
+                )
+                if auto_select and is_failoverable and idx < len(failover_candidates) - 1:
+                    cooldown_sec = getattr(self.settings, "failover_cooldown_seconds", 60.0)
+                    self.mark_model_cooldown(cand_model, cooldown_sec)
+                    next_model = failover_candidates[idx + 1]
+                    logger.warning(
+                        f"Gemini stream model '{cand_model}' failed to initialize ({typed_err}). "
+                        f"Failing over to '{next_model}'..."
+                    )
+                    continue
+
+                logger.error(f"Error during streaming generation on '{cand_model}': {typed_err}")
+                raise typed_err from exc
 
     async def astream_text(
         self,

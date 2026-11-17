@@ -371,7 +371,8 @@ def test_desktop_authorization_scope_strict_default_deny(tmp_path: Path) -> None
 
         # 4. Overwriting existing file without explicit authorization -> Denied
         with pytest.raises(
-            PermissionError, match="Overwriting existing file 'private_notes.txt' on Desktop"
+            PermissionError,
+            match=r"Overwriting existing file 'private_notes.txt' (?:on|in) Desktop",
         ):
             sec.validate_and_resolve_path(str(existing_file), operation="write")
 

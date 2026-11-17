@@ -247,6 +247,36 @@ class ProviderManager(BaseAIProvider):
             return []
 
         candidates: list[str] = []
+
+        # If Gemini and auto model selection enabled, respect the configured strength tier sequence
+        if current_provider_id.lower().strip() == "gemini" and getattr(
+            self.settings, "gemini_auto_model_selection", False
+        ):
+            fallback_order = getattr(
+                self.settings,
+                "gemini_model_fallback_order",
+                [
+                    "gemini-2.5-pro",
+                    "gemini-3.8-flash",
+                    "gemini-3.7-flash",
+                    "gemini-3.6-flash",
+                    "gemini-3.5-flash",
+                    "gemini-3.5-flash-lite",
+                    "gemini-3.1-flash-lite",
+                    "gemini-2.5-flash-lite",
+                    "gemini-2.5-flash",
+                ],
+            )
+            for m in fallback_order:
+                if (
+                    m != current_model
+                    and m not in candidates
+                    and not self.is_model_in_cooldown(current_provider_id, m)
+                ):
+                    candidates.append(m)
+            if candidates:
+                return candidates
+
         # First check documented replacement model if available
         replacement = ModelCatalog.get_replacement_model(current_provider_id, current_model)
         if (

@@ -153,3 +153,25 @@ class AudioDeviceManager:
                 return True
         logger.warning(f"Audio output device not found: '{device_identifier}'")
         return False
+
+    def validate_device(self, device_identifier: str, is_input: bool = True) -> tuple[bool, str]:
+        """Validate whether a given device identifier is connected and healthy."""
+        self.refresh_devices()
+        devices = self._input_devices if is_input else self._output_devices
+        for d in devices:
+            if d.id == device_identifier or d.name == device_identifier:
+                return True, f"Device '{d.name}' is operational ({d.channels} ch)."
+        return False, f"Device '{device_identifier}' is disconnected or unavailable."
+
+    @classmethod
+    def get_device_options(cls, is_input: bool = True) -> list[tuple[str, str]]:
+        """Return list of (display_label, device_id) for UI combo population."""
+        mgr = cls()
+        mgr.refresh_devices()
+        devices = mgr._input_devices if is_input else mgr._output_devices
+        options = []
+        for d in devices:
+            tag = " [Default]" if d.is_default else ""
+            label = f"{d.name}{tag}"
+            options.append((label, d.id))
+        return options

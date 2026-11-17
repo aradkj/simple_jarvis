@@ -1,5 +1,6 @@
 """Main desktop window for the JARVIS personal assistant application."""
 
+import re
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -53,9 +55,13 @@ from tools.voice.elevenlabs_provider import (
 from ui.chat_panel import ChatPanel
 from ui.coding_agent_dialog import CodingAgentDialog
 from ui.communication_dialog import CommunicationDialog
+from ui.file_intelligence_dialog import FileIntelligenceDialog
+from ui.integrations_dialog import IntegrationsDialog
 from ui.memory_dialog import MemoryManagementDialog
+from ui.personality_memory_dialog import PersonalityMemoryDialog
 from ui.status_panel import StatusPanel
 from ui.styles import DARK_THEME_QSS
+from ui.visualizer import JarvisVisualizerWidget
 from ui.workers import AgentExecutionWorker, ConnectionTestWorker, GeminiStreamWorker
 
 logger = get_logger("ui.main_window")
@@ -452,25 +458,89 @@ class SettingsDialog(QDialog):
             "Consent to Cloud Speech Synthesis (ElevenLabs / Azure)"
         )
         self.cloud_tts_consent_chk.setChecked(
-            getattr(self.settings, "voice_cloud_tts_consent", True)
+            bool(getattr(self.settings, "voice_cloud_tts_consent", False))
         )
         switches_grid.addWidget(self.cloud_tts_consent_chk, 0, 1)
 
+        self.cloud_stt_consent_chk = QCheckBox(
+            "Consent to Cloud Speech Recognition (Gemini Multimodal STT)"
+        )
+        self.cloud_stt_consent_chk.setChecked(
+            bool(getattr(self.settings, "voice_cloud_stt_consent", False))
+        )
+        switches_grid.addWidget(self.cloud_stt_consent_chk, 1, 0)
+
         self.voice_tts_enabled_chk = QCheckBox("Enable Spoken Voice Responses")
         self.voice_tts_enabled_chk.setChecked(getattr(self.settings, "voice_tts_enabled", True))
-        switches_grid.addWidget(self.voice_tts_enabled_chk, 1, 0)
+        switches_grid.addWidget(self.voice_tts_enabled_chk, 1, 1)
 
         self.wake_word_chk = QCheckBox("Continuous Acoustic Wake-Word Listening")
         self.wake_word_chk.setChecked(getattr(self.settings, "voice_wake_word_enabled", True))
-        switches_grid.addWidget(self.wake_word_chk, 1, 1)
+        switches_grid.addWidget(self.wake_word_chk, 2, 0)
 
         self.continuous_listening_chk = QCheckBox("Stay Listening After Spoken Activation")
         self.continuous_listening_chk.setChecked(
             getattr(self.settings, "voice_continuous_listening", True)
         )
-        switches_grid.addWidget(self.continuous_listening_chk, 2, 0, 1, 2)
+        switches_grid.addWidget(self.continuous_listening_chk, 2, 1)
 
         voice_layout.addLayout(switches_grid)
+
+        # Microphone Device Selector & Live Tester
+        from tools.voice.device_manager import AudioDeviceManager
+
+        mic_row = QHBoxLayout()
+        mic_row.addWidget(QLabel("<b>Microphone Device:</b>"))
+        self.mic_device_combo = QComboBox()
+        self.mic_device_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        device_opts = AudioDeviceManager.get_device_options()
+        cur_dev = getattr(self.settings, "voice_input_device", "")
+        sel_mic_idx = 0
+        for idx, (label, dev_id) in enumerate(device_opts):
+            self.mic_device_combo.addItem(label, dev_id)
+            if dev_id == cur_dev:
+                sel_mic_idx = idx
+        self.mic_device_combo.setCurrentIndex(sel_mic_idx)
+        mic_row.addWidget(self.mic_device_combo, stretch=1)
+
+        self.test_mic_btn = QPushButton("⚡ Test Mic")
+        self.test_mic_btn.clicked.connect(self._on_test_microphone)
+        mic_row.addWidget(self.test_mic_btn)
+        voice_layout.addLayout(mic_row)
+
+        self.mic_test_progress = QProgressBar()
+        self.mic_test_progress.setRange(0, 100)
+        self.mic_test_progress.setValue(0)
+        self.mic_test_progress.setFixedHeight(6)
+        self.mic_test_progress.setTextVisible(False)
+        self.mic_test_progress.setStyleSheet(
+            "QProgressBar { background-color: #161b22; border: 1px solid #30363d; border-radius: 3px; }"
+            "QProgressBar::chunk { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00e5ff, stop:1 #00ff88); border-radius: 2px; }"
+        )
+        voice_layout.addWidget(self.mic_test_progress)
+
+        # VAD & Silence Sliders
+        vad_layout = QGridLayout()
+        vad_layout.addWidget(QLabel("<b>Silence Timeout:</b>"), 0, 0)
+        self.silence_timeout_spin = QDoubleSpinBox()
+        self.silence_timeout_spin.setRange(0.4, 6.0)
+        self.silence_timeout_spin.setSingleStep(0.2)
+        self.silence_timeout_spin.setSuffix(" s")
+        self.silence_timeout_spin.setValue(
+            float(getattr(self.settings, "voice_silence_timeout_seconds", 0.8))
+        )
+        vad_layout.addWidget(self.silence_timeout_spin, 0, 1)
+
+        vad_layout.addWidget(QLabel("<b>VAD Energy Threshold:</b>"), 0, 2)
+        self.vad_threshold_spin = QDoubleSpinBox()
+        self.vad_threshold_spin.setRange(0.005, 0.1)
+        self.vad_threshold_spin.setSingleStep(0.005)
+        self.vad_threshold_spin.setDecimals(3)
+        self.vad_threshold_spin.setValue(
+            float(getattr(self.settings, "voice_vad_energy_threshold", 0.015))
+        )
+        vad_layout.addWidget(self.vad_threshold_spin, 0, 3)
+        voice_layout.addLayout(vad_layout)
 
         # Wake word row
         wake_row = QHBoxLayout()
@@ -978,149 +1048,76 @@ class SettingsDialog(QDialog):
             self.voice_test_status_lbl.setText(f"Voice preview error: {exc}")
             self.voice_test_status_lbl.setStyleSheet("color: #d29922;")
 
-    def _on_check_audio_status(self) -> None:
-        try:
-            from tools.windows.windows_service import WindowsControlService
+    def _on_test_microphone(self) -> None:
+        """Perform a live 2.5-second microphone test reading real-time RMS from selected device."""
+        self.test_mic_btn.setEnabled(False)
+        self.mic_test_progress.setValue(0)
+        self.voice_test_status_lbl.setText("🎙️ Testing microphone... Please speak now.")
+        self.voice_test_status_lbl.setStyleSheet("color: #00e5ff;")
 
-            svc = WindowsControlService(settings=self.settings)
-            status = svc.get_audio_status()
-            muted_str = "Muted" if status.is_muted else "Unmuted"
-            self.win_status_lbl.setText(f"🔊 Master Volume: {status.volume_percent}% ({muted_str})")
-        except Exception as exc:
-            self.win_status_lbl.setText(f"Audio inspection failed: {exc}")
-
-    def _on_check_power_status(self) -> None:
-        try:
-            from tools.windows.windows_service import WindowsControlService
-
-            svc = WindowsControlService(settings=self.settings)
-            status = svc.get_power_status()
-            self.win_status_lbl.setText(
-                f"🔋 Battery: {status.battery_percent}% (AC: {status.ac_line_status}, State: {status.battery_status})"
-            )
-        except Exception as exc:
-            self.win_status_lbl.setText(f"Power inspection failed: {exc}")
-
-    def _on_check_windows_count(self) -> None:
-        try:
-            from tools.windows.windows_service import WindowsControlService
-
-            svc = WindowsControlService(settings=self.settings)
-            wins = svc.list_windows()
-            self.win_status_lbl.setText(f"🪟 Active Desktop Windows: {len(wins)} detected")
-        except Exception as exc:
-            self.win_status_lbl.setText(f"Window enumeration failed: {exc}")
-
-    def _toggle_elevenlabs_key_visibility(self) -> None:
-        if self.elevenlabs_key_edit.echoMode() == QLineEdit.EchoMode.Password:
-            self.elevenlabs_key_edit.setEchoMode(QLineEdit.EchoMode.Normal)
-            self.toggle_el_key_btn.setText("🔒 Hide")
-        else:
-            self.elevenlabs_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-            self.toggle_el_key_btn.setText("👁 Show")
-
-    def _on_elevenlabs_voice_changed(self, index: int) -> None:
-        vid = self.elevenlabs_voice_combo.currentData()
-        if vid in CURATED_BRITISH_VOICES:
-            self.voice_desc_lbl.setText(CURATED_BRITISH_VOICES[vid].get("description", ""))
-        else:
-            self.voice_desc_lbl.setText(f"Voice ID: {vid}")
-
-    def _on_fetch_elevenlabs_voices(self) -> None:
-        key = self.elevenlabs_key_edit.text().strip()
-        self.fetch_voices_btn.setEnabled(False)
-        self.voice_test_status_lbl.setText("Querying ElevenLabs /v1/voices catalog...")
-        try:
-            import os
-
-            if key:
-                os.environ["ELEVENLABS_API_KEY"] = key
-            prov = ElevenLabsTTSProvider(settings=self.settings)
-            voices = prov.fetch_available_voices(use_cache=False)
-            self.elevenlabs_voice_combo.blockSignals(True)
-            self.elevenlabs_voice_combo.clear()
-            cur_vid = getattr(self.settings, "elevenlabs_voice_id", DEFAULT_BRITISH_VOICE_ID)
-            sel_idx = 0
-            for idx, v in enumerate(voices):
-                label = f"{v.name} ({v.voice_id}) - {v.accent} {v.gender}"
-                self.elevenlabs_voice_combo.addItem(label, v.voice_id)
-                if v.voice_id == cur_vid:
-                    sel_idx = idx
-            self.elevenlabs_voice_combo.setCurrentIndex(sel_idx)
-            self.elevenlabs_voice_combo.blockSignals(False)
-            self.voice_test_status_lbl.setText(
-                f"✅ Discovered {len(voices)} voices from ElevenLabs library."
-            )
-            self.voice_test_status_lbl.setStyleSheet("color: #3fb950; font-weight: bold;")
-        except Exception as exc:
-            self.voice_test_status_lbl.setText(f"Voice discovery notice: {exc}")
-            self.voice_test_status_lbl.setStyleSheet("color: #d29922;")
-        finally:
-            self.fetch_voices_btn.setEnabled(True)
-
-    def _on_test_elevenlabs(self) -> None:
-        key = self.elevenlabs_key_edit.text().strip()
-        if not key:
-            self.voice_test_status_lbl.setText("Please enter an ElevenLabs API key first.")
-            self.voice_test_status_lbl.setStyleSheet("color: #d29922; font-weight: bold;")
-            return
-
-        self.test_elevenlabs_btn.setEnabled(False)
-        self.voice_test_status_lbl.setText("Testing ElevenLabs API connection...")
-        self.voice_test_status_lbl.setStyleSheet("color: #58a6ff;")
+        dev_id = self.mic_device_combo.currentData() or ""
 
         try:
-            import urllib.error
-            import urllib.request
+            from PySide6.QtMultimedia import QAudioFormat, QAudioSource, QMediaDevices
 
-            req = urllib.request.Request(
-                "https://api.elevenlabs.io/v1/user",
-                headers={"xi-api-key": key, "User-Agent": "JARVIS-Desktop/10.0"},
-                method="GET",
-            )
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                if resp.status == 200:
+            from tools.voice.vad import VoiceActivityDetector
+
+            vad = VoiceActivityDetector()
+
+            target_device = None
+            if dev_id:
+                for d in QMediaDevices.audioInputs():
+                    dev_bytes = d.id().data().decode("utf-8", "ignore")
+                    if (
+                        dev_id.lower() in dev_bytes.lower()
+                        or dev_id.lower() in d.description().lower()
+                    ):
+                        target_device = d
+                        break
+            if target_device is None:
+                target_device = QMediaDevices.defaultAudioInput()
+
+            if not target_device or target_device.isNull():
+                self.voice_test_status_lbl.setText("❌ No audio input device detected.")
+                self.voice_test_status_lbl.setStyleSheet("color: #f85149;")
+                self.test_mic_btn.setEnabled(True)
+                return
+
+            fmt = QAudioFormat()
+            fmt.setSampleRate(16000)
+            fmt.setChannelCount(1)
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            if not target_device.isFormatSupported(fmt):
+                fmt = target_device.preferredFormat()
+
+            test_source = QAudioSource(target_device, fmt)
+            test_io = test_source.start()
+
+            test_timer = QTimer(self)
+            elapsed_ticks = [0]
+
+            def _test_chunk() -> None:
+                if test_io and test_io.isOpen():
+                    data = test_io.readAll().data()
+                    if data:
+                        rms = vad.compute_rms(data[:3200])
+                        pct = min(100, int(rms * 800.0))
+                        self.mic_test_progress.setValue(pct)
+                elapsed_ticks[0] += 1
+                if elapsed_ticks[0] >= 50:  # 50 * 50ms = 2.5 seconds
+                    test_timer.stop()
+                    test_source.stop()
+                    self.test_mic_btn.setEnabled(True)
                     self.voice_test_status_lbl.setText(
-                        "✅ ElevenLabs connection successful! British voice pipeline authenticated."
+                        f"✅ Microphone test completed on '{target_device.description()}'. Input level verified."
                     )
                     self.voice_test_status_lbl.setStyleSheet("color: #3fb950; font-weight: bold;")
-        except urllib.error.HTTPError as http_err:
-            if http_err.code == 401:
-                self.voice_test_status_lbl.setText(
-                    "❌ Authentication failed (HTTP 401). Invalid API key."
-                )
-            else:
-                self.voice_test_status_lbl.setText(
-                    f"❌ ElevenLabs returned HTTP {http_err.code}: {http_err.reason}"
-                )
-            self.voice_test_status_lbl.setStyleSheet("color: #f85149; font-weight: bold;")
-        except Exception as exc:
-            self.voice_test_status_lbl.setText(f"❌ Connection error: {exc}")
-            self.voice_test_status_lbl.setStyleSheet("color: #f85149; font-weight: bold;")
-        finally:
-            self.test_elevenlabs_btn.setEnabled(True)
 
-    def _on_preview_voice(self) -> None:
-        key = self.elevenlabs_key_edit.text().strip()
-        voice_id = self.elevenlabs_voice_combo.currentData() or DEFAULT_BRITISH_VOICE_ID
-        self.voice_test_status_lbl.setText("🔊 Playing voice preview...")
-        self.voice_test_status_lbl.setStyleSheet("color: #58a6ff;")
-        try:
-            from tools.voice.models import TTSRequest
-
-            service = ElevenLabsTTSService(settings=self.settings)
-            if key:
-                service.provider.get_api_key = lambda: key  # type: ignore[method-assign]
-            service.speak(
-                TTSRequest(
-                    text="Good day, sir. JARVIS voice identity systems are fully operational.",
-                    voice_name=voice_id,
-                    language="en",
-                )
-            )
+            test_timer.timeout.connect(_test_chunk)
+            test_timer.start(50)
         except Exception as exc:
-            self.voice_test_status_lbl.setText(f"Voice preview error: {exc}")
-            self.voice_test_status_lbl.setStyleSheet("color: #d29922;")
+            self.voice_test_status_lbl.setText(f"Microphone test notice: {exc}")
+            self.test_mic_btn.setEnabled(True)
 
     def _save_settings(self) -> None:
         self._save_active_provider_fields()
@@ -1219,6 +1216,12 @@ class SettingsDialog(QDialog):
             "VOICE_CLOUD_TTS_CONSENT": (
                 "true" if self.cloud_tts_consent_chk.isChecked() else "false"
             ),
+            "VOICE_CLOUD_STT_CONSENT": (
+                "true" if self.cloud_stt_consent_chk.isChecked() else "false"
+            ),
+            "VOICE_INPUT_DEVICE": self.mic_device_combo.currentData() or "",
+            "VOICE_SILENCE_TIMEOUT_SECONDS": str(round(self.silence_timeout_spin.value(), 2)),
+            "VOICE_VAD_ENERGY_THRESHOLD": str(round(self.vad_threshold_spin.value(), 4)),
             "VOICE_TTS_ENABLED": ("true" if self.voice_tts_enabled_chk.isChecked() else "false"),
             "VOICE_TTS_ENGINE": "elevenlabs",
             "ELEVENLABS_VOICE_ID": self.elevenlabs_voice_combo.currentData()
@@ -1321,7 +1324,7 @@ class MainWindow(QMainWindow):
 
         app_title = QLabel(self.settings.app_name)
         app_title.setObjectName("AppTitle")
-        app_subtitle = QLabel("Personal AI Agent — Phase 2 Multi-Provider Edition")
+        app_subtitle = QLabel("Personal AI Agent — Voice-First Autonomous Assistant")
         app_subtitle.setObjectName("AppSubtitle")
 
         title_layout.addWidget(app_title)
@@ -1339,9 +1342,17 @@ class MainWindow(QMainWindow):
         self.clear_chat_btn.clicked.connect(self._handle_clear_chat)
         header_layout.addWidget(self.clear_chat_btn)
 
-        self.memory_btn = QPushButton("🧠 Memory")
-        self.memory_btn.clicked.connect(self._open_memory_dialog)
+        self.memory_btn = QPushButton("🧠 Personality & Memory")
+        self.memory_btn.setToolTip(
+            "Manage Permanent Identity, Contacts, Preferences, Facts & Personality Tone (Ctrl+M)"
+        )
+        self.memory_btn.setShortcut("Ctrl+M")
+        self.memory_btn.clicked.connect(self._open_personality_memory_dialog)
         header_layout.addWidget(self.memory_btn)
+
+        self.files_btn = QPushButton("📁 Files & Apps")
+        self.files_btn.clicked.connect(self._open_file_dialog)
+        header_layout.addWidget(self.files_btn)
 
         self.coding_agent_btn = QPushButton("💻 Coding Agent")
         self.coding_agent_btn.clicked.connect(self._open_coding_agent_dialog)
@@ -1351,21 +1362,9 @@ class MainWindow(QMainWindow):
         self.comms_btn.clicked.connect(self._open_communication_dialog)
         header_layout.addWidget(self.comms_btn)
 
-        # Phase 9 Voice Controls
-        self.voice_ptt_btn = QPushButton("🎙 Speak")
-        self.voice_ptt_btn.setStyleSheet(
-            "background-color: #1c71d8; color: white; font-weight: bold;"
-        )
-        self.voice_ptt_btn.clicked.connect(self._handle_voice_ptt)
-        header_layout.addWidget(self.voice_ptt_btn)
-
-        self.voice_mute_btn = QPushButton("🔊 Audio")
-        self.voice_mute_btn.clicked.connect(self._handle_voice_mute)
-        header_layout.addWidget(self.voice_mute_btn)
-
-        self.voice_status_lbl = QLabel("")
-        self.voice_status_lbl.setStyleSheet("color: #f6d32d; font-weight: bold; margin-left: 4px;")
-        header_layout.addWidget(self.voice_status_lbl)
+        self.integrations_btn = QPushButton("🔌 Integrations")
+        self.integrations_btn.clicked.connect(self._open_integrations_dialog)
+        header_layout.addWidget(self.integrations_btn)
 
         self.settings_btn = QPushButton("⚙ Settings")
         self.settings_btn.clicked.connect(self._open_settings_dialog)
@@ -1373,10 +1372,71 @@ class MainWindow(QMainWindow):
 
         main_vbox.addWidget(header)
 
-        # 2. Main Body Splitter (Chat Panel on left/center, Status Panel on right)
+        # 2. Main Body Splitter (Center container on left, Status Panel on right)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setHandleWidth(1)
 
+        center_container = QWidget()
+        center_layout = QVBoxLayout(center_container)
+        center_layout.setContentsMargins(12, 12, 12, 12)
+        center_layout.setSpacing(10)
+
+        # A. Cinematic Holographic Reactor & Audio RMS Waveform Visualizer
+        self.visualizer = JarvisVisualizerWidget()
+        self.visualizer.setFixedHeight(180)
+        center_layout.addWidget(self.visualizer)
+
+        # B. Voice Interaction Control Deck Card
+        voice_deck = QFrame()
+        voice_deck.setObjectName("VoiceDeckCard")
+        deck_layout = QHBoxLayout(voice_deck)
+        deck_layout.setContentsMargins(12, 8, 12, 8)
+        deck_layout.setSpacing(10)
+
+        self.voice_conv_btn = QPushButton("🎙️ Start Voice Conversation")
+        self.voice_conv_btn.setObjectName("VoiceConversationBtn")
+        self.voice_conv_btn.clicked.connect(self._handle_toggle_conversation_mode)
+        deck_layout.addWidget(self.voice_conv_btn)
+
+        self.voice_ptt_btn = QPushButton("🗣️ Speak")
+        self.voice_ptt_btn.setStyleSheet(
+            "background-color: #1c71d8; color: white; font-weight: bold;"
+        )
+        self.voice_ptt_btn.clicked.connect(self._handle_voice_ptt)
+        deck_layout.addWidget(self.voice_ptt_btn)
+
+        self.voice_interrupt_btn = QPushButton("🛑 Stop")
+        self.voice_interrupt_btn.setObjectName("VoiceBargeInBtn")
+        self.voice_interrupt_btn.clicked.connect(self._handle_voice_interrupt)
+        deck_layout.addWidget(self.voice_interrupt_btn)
+
+        self.voice_repeat_btn = QPushButton("🔁 Replay")
+        self.voice_repeat_btn.clicked.connect(self._handle_voice_repeat)
+        deck_layout.addWidget(self.voice_repeat_btn)
+
+        self.voice_mute_btn = QPushButton("🔊 Audio")
+        self.voice_mute_btn.clicked.connect(self._handle_voice_mute)
+        deck_layout.addWidget(self.voice_mute_btn)
+
+        deck_layout.addStretch()
+
+        cur_voice_id = getattr(self.settings, "elevenlabs_voice_id", DEFAULT_BRITISH_VOICE_ID)
+        voice_label = CURATED_BRITISH_VOICES.get(cur_voice_id, {}).get("name", "George (British)")
+        self.voice_persona_lbl = QLabel(f"🗣️ {voice_label}")
+        self.voice_persona_lbl.setObjectName("VoiceStatusBadge")
+        deck_layout.addWidget(self.voice_persona_lbl)
+
+        self.voice_hw_lbl = QLabel("🎤 Mic Ready")
+        self.voice_hw_lbl.setObjectName("VoiceStatusBadge")
+        deck_layout.addWidget(self.voice_hw_lbl)
+
+        self.voice_status_lbl = QLabel("🎙️ Ready ('Hey Jarvis')")
+        self.voice_status_lbl.setObjectName("VoiceStatusBadge")
+        deck_layout.addWidget(self.voice_status_lbl)
+
+        center_layout.addWidget(voice_deck)
+
+        # C. Multi-turn Chat Panel
         self.chat_panel = ChatPanel()
         self.chat_panel.message_submitted.connect(self._handle_user_message)
         self.chat_panel.cancellation_requested.connect(self._handle_cancellation)
@@ -1384,12 +1444,14 @@ class MainWindow(QMainWindow):
         self.chat_panel.new_chat_requested.connect(self._handle_new_chat)
         self.chat_panel.clear_chat_requested.connect(self._handle_clear_chat)
         self.chat_panel.approval_decided.connect(self._handle_approval_decision)
-        splitter.addWidget(self.chat_panel)
+        center_layout.addWidget(self.chat_panel, stretch=1)
+
+        splitter.addWidget(center_container)
 
         self.status_panel = StatusPanel()
         splitter.addWidget(self.status_panel)
 
-        # Give chat panel 75% of space, status panel 25%
+        # Give center container 75% of space, status panel 25%
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
 
@@ -1483,52 +1545,90 @@ class MainWindow(QMainWindow):
         )
 
     def _on_voice_event(self, event: AgentEvent) -> None:
-        """Update voice status indicator on voice pipeline state transitions."""
+        """Update voice status indicator and visualizer on voice pipeline state transitions."""
         evt = event.event_type
         if evt == AgentEventType.VOICE_LISTENING_STARTED:
-            self.voice_status_lbl.setText("🎙️ Listening...")
+            if self.agent.voice_pipeline and self.agent.voice_pipeline.is_conversation_mode:
+                self.voice_conv_btn.setText("🛑 End Listening Session")
+                self.voice_conv_btn.setProperty("active", "true")
+                self.voice_conv_btn.style().unpolish(self.voice_conv_btn)
+                self.voice_conv_btn.style().polish(self.voice_conv_btn)
+                self.voice_status_lbl.setText("🎙️ Listening...")
+            else:
+                self.voice_status_lbl.setText("🎙️ Listening...")
             self.voice_ptt_btn.setText("⏹ Stop")
+            self.visualizer.set_voice_state("listening")
         elif evt == AgentEventType.VOICE_LISTENING_STOPPED:
+            if self.agent.voice_pipeline and not self.agent.voice_pipeline.is_conversation_mode:
+                self.voice_conv_btn.setText("🎙️ Start Voice Conversation")
+                self.voice_conv_btn.setProperty("active", "false")
+                self.voice_conv_btn.style().unpolish(self.voice_conv_btn)
+                self.voice_conv_btn.style().polish(self.voice_conv_btn)
             status = (
                 "🎙️ Ready ('Hey Jarvis')"
                 if getattr(self.settings, "voice_wake_word_enabled", True)
-                else ""
+                else "Standby"
             )
             self.voice_status_lbl.setText(status)
-            self.voice_ptt_btn.setText("🎙 Speak")
+            self.voice_ptt_btn.setText("🗣️ Speak")
+            self.visualizer.set_voice_state("idle")
         elif evt == AgentEventType.VOICE_TTS_STARTED:
-            self.voice_status_lbl.setText("🔊 Speaking...")
+            self.voice_status_lbl.setText("🔊 Speaking (George Neural)...")
+            self.visualizer.set_voice_state("speaking")
         elif evt == AgentEventType.VOICE_TTS_STOPPED:
-            status = (
-                "🎙️ Ready ('Hey Jarvis')"
-                if getattr(self.settings, "voice_wake_word_enabled", True)
-                else ""
-            )
-            self.voice_status_lbl.setText(status)
+            if self.agent.voice_pipeline and self.agent.voice_pipeline.is_conversation_mode:
+                self.voice_status_lbl.setText("🎙️ Conversation Mode Active")
+                self.visualizer.set_voice_state("listening")
+            else:
+                status = (
+                    "🎙️ Ready ('Hey Jarvis')"
+                    if getattr(self.settings, "voice_wake_word_enabled", True)
+                    else "Standby"
+                )
+                self.voice_status_lbl.setText(status)
+                self.visualizer.set_voice_state("idle")
         elif evt == AgentEventType.VOICE_TRANSCRIPT_READY:
             text = event.payload.get("text", "")
             if text:
-                self.voice_status_lbl.setText(f'🗣 "{text[:25]}..."')
+                self.voice_status_lbl.setText(f'🗣 "{text[:30]}..."')
+                self.visualizer.set_voice_state("thinking")
                 self.voice_transcript_received.emit(text)
+        elif evt == AgentEventType.VOICE_WAKE_WORD_DETECTED:
+            self.visualizer.set_voice_state("wake_detected")
+        elif evt == AgentEventType.AGENT_STATUS_CHANGED:
+            state_val = event.payload.get("state", "")
+            if state_val:
+                self.visualizer.set_voice_state(state_val)
 
     def _handle_voice_transcript_received(self, text: str) -> None:
         """Process spoken transcript received via voice pipeline on the Qt GUI main thread."""
         logger.info(f"MainWindow processing spoken input: '{text}'")
+        self._is_voice_turn = True
+        self._sentence_tts_buffer = ""
+        self._sentence_tts_sent_count = 0
         self._handle_user_message(text)
 
     def _init_voice_pipeline(self) -> None:
         """Initialize continuous microphone capture stream on application launch."""
         if not self.agent.voice_pipeline:
             return
+
+        self.agent.voice_pipeline.set_mic_level_callback(self.visualizer.set_mic_level)
+        hw_name = self.agent.voice_pipeline.get_active_input_device_name()
+        if hasattr(self, "voice_hw_lbl"):
+            self.voice_hw_lbl.setText(f"🎤 {hw_name[:20]}")
+
         if getattr(self.settings, "voice_wake_word_enabled", True) or getattr(
             self.settings, "voice_continuous_listening", True
         ):
             started = self.agent.voice_pipeline.start_audio_capture()
             if started:
                 self.voice_status_lbl.setText("🎙️ Ready ('Hey Jarvis')")
-                logger.info("Voice pipeline capture started automatically on application launch.")
+                self.visualizer.set_voice_state("idle")
+                logger.info(f"Voice pipeline capture started on '{hw_name}' on application launch.")
             else:
                 self.voice_status_lbl.setText("🎙️ Mic Offline")
+                self.visualizer.set_voice_state("error", "MIC OFFLINE")
                 logger.warning("Voice pipeline could not start microphone capture on launch.")
 
     def _handle_approval_decision(self, proposal_id: str, approved: bool, session_id: str) -> None:
@@ -1730,19 +1830,41 @@ class MainWindow(QMainWindow):
         self._refresh_status_panel()
 
         if self.agent.voice_pipeline and getattr(self.settings, "voice_tts_enabled", True):
+            from core.persian.language_policy import ResponseLanguage
+            from core.persian.response_controller import MultilingualResponseController
             from core.personality import JarvisPersonalityEngine
 
             policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
             explicit_fa = JarvisPersonalityEngine.detect_explicit_persian_request(
                 getattr(self, "_pending_prompt_text", "") or ""
             )
-            if explicit_fa or policy == "PERSIAN":
-                spoken = final_text
-            else:
+            target_lang = (
+                ResponseLanguage.PERSIAN
+                if (explicit_fa or policy == "PERSIAN")
+                else ResponseLanguage.ENGLISH
+            )
+
+            controller = MultilingualResponseController()
+            persian_chars = len(re.findall(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", final_text))
+            total_alpha = len(
+                re.findall(r"[a-zA-Z\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", final_text)
+            )
+            is_predominantly_persian = total_alpha > 0 and (persian_chars / total_alpha) > 0.4
+
+            if target_lang == ResponseLanguage.ENGLISH and is_predominantly_persian:
                 spoken = JarvisPersonalityEngine.format_spoken_response_en(
                     text=final_text,
                     user_prompt=getattr(self, "_pending_prompt_text", "") or "",
                 )
+            else:
+                spoken = controller.sanitize_for_speech(final_text, language=target_lang)
+
+            if target_lang == ResponseLanguage.ENGLISH:
+                from core.personality import filter_english_speech_only
+
+                spoken = filter_english_speech_only(spoken)
+
+            self._last_assistant_speech = spoken
             self.agent.voice_pipeline.speak(spoken)
 
     def _on_agent_task_error(self, error_message: str, session_id: str) -> None:
@@ -1796,6 +1918,46 @@ class MainWindow(QMainWindow):
         self._active_stream_text += chunk
         self.chat_panel.append_streaming_chunk(chunk)
 
+        # Sentence-level streaming TTS for instant low-latency audible delivery
+        if (
+            self.agent.voice_pipeline
+            and getattr(self.settings, "voice_tts_enabled", True)
+            and getattr(self, "_is_voice_turn", False)
+        ):
+            self._sentence_tts_buffer += chunk
+            m = re.search(r"([.!?؟\n]+)\s+", self._sentence_tts_buffer)
+            if m:
+                end_pos = m.end()
+                sentence = self._sentence_tts_buffer[:end_pos].strip()
+                self._sentence_tts_buffer = self._sentence_tts_buffer[end_pos:]
+                if len(sentence.split()) >= 3:
+                    from core.persian.language_policy import ResponseLanguage
+                    from core.persian.response_controller import MultilingualResponseController
+                    from core.personality import JarvisPersonalityEngine
+
+                    policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
+                    explicit_fa = JarvisPersonalityEngine.detect_explicit_persian_request(
+                        getattr(self, "_pending_prompt_text", "") or ""
+                    )
+                    target_lang = (
+                        ResponseLanguage.PERSIAN
+                        if (explicit_fa or policy == "PERSIAN")
+                        else ResponseLanguage.ENGLISH
+                    )
+                    # When speaking in English, prevent leaking Persian chunks into TTS
+                    if target_lang == ResponseLanguage.ENGLISH:
+                        fa_chars = len(
+                            re.findall(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", sentence)
+                        )
+                        en_chars = len(re.findall(r"[a-zA-Z]", sentence))
+                        if fa_chars > 0 and (en_chars == 0 or fa_chars >= en_chars):
+                            return
+                    controller = MultilingualResponseController()
+                    spoken_part = controller.sanitize_for_speech(sentence, language=target_lang)
+                    if spoken_part:
+                        self._sentence_tts_sent_count += 1
+                        self.agent.voice_pipeline.speak(spoken_part, queue=True)
+
     def _on_stream_finished(self, final_text: str, session_id: str) -> None:
         """Finalize streamed response and persist complete message to database."""
         if session_id != self.agent.active_session_id:
@@ -1821,23 +1983,61 @@ class MainWindow(QMainWindow):
         self._refresh_status_panel()
 
         if self.agent.voice_pipeline and getattr(self.settings, "voice_tts_enabled", True):
+            from core.persian.language_policy import ResponseLanguage
+            from core.persian.response_controller import MultilingualResponseController
             from core.personality import JarvisPersonalityEngine
 
             policy = getattr(self.settings, "response_language_policy", "DEFAULT_ENGLISH")
             explicit_fa = JarvisPersonalityEngine.detect_explicit_persian_request(
                 getattr(self, "_pending_prompt_text", "") or ""
             )
-            if explicit_fa or policy == "PERSIAN":
-                spoken = final_text
-            else:
+            target_lang = (
+                ResponseLanguage.PERSIAN
+                if (explicit_fa or policy == "PERSIAN")
+                else ResponseLanguage.ENGLISH
+            )
+
+            controller = MultilingualResponseController()
+            persian_chars = len(re.findall(r"[\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", final_text))
+            total_alpha = len(
+                re.findall(r"[a-zA-Z\u0600-\u06FF\uFB8A\u067E\u0686\u06AF]", final_text)
+            )
+            is_predominantly_persian = total_alpha > 0 and (persian_chars / total_alpha) > 0.4
+
+            if target_lang == ResponseLanguage.ENGLISH and is_predominantly_persian:
                 spoken = JarvisPersonalityEngine.format_spoken_response_en(
                     text=final_text,
                     user_prompt=getattr(self, "_pending_prompt_text", "") or "",
                 )
-            self.agent.voice_pipeline.speak(spoken)
+            else:
+                spoken = controller.sanitize_for_speech(final_text, language=target_lang)
+
+            if target_lang == ResponseLanguage.ENGLISH:
+                from core.personality import filter_english_speech_only
+
+                spoken = filter_english_speech_only(spoken)
+
+            self._last_assistant_speech = spoken
+            if getattr(self, "_sentence_tts_sent_count", 0) > 0:
+                # Flush any leftover sentence tail from streaming buffer
+                trailing = getattr(self, "_sentence_tts_buffer", "").strip()
+                if trailing:
+                    spoken_tail = controller.sanitize_for_speech(trailing, language=target_lang)
+                    if spoken_tail:
+                        self.agent.voice_pipeline.speak(spoken_tail, queue=True)
+            else:
+                self.agent.voice_pipeline.speak(spoken)
+
+        self._sentence_tts_buffer = ""
+        self._sentence_tts_sent_count = 0
+        self._is_voice_turn = False
 
     def _on_stream_error(self, error_message: str, session_id: str) -> None:
         """Handle streaming failure gracefully."""
+        self._sentence_tts_buffer = ""
+        self._sentence_tts_sent_count = 0
+        self._is_voice_turn = False
+
         if session_id != self.agent.active_session_id:
             return
 
@@ -1864,6 +2064,10 @@ class MainWindow(QMainWindow):
 
     def _on_stream_cancelled(self, session_id: str) -> None:
         """Handle user-initiated stream cancellation."""
+        self._sentence_tts_buffer = ""
+        self._sentence_tts_sent_count = 0
+        self._is_voice_turn = False
+
         if session_id != self.agent.active_session_id:
             return
 
@@ -1957,12 +2161,22 @@ class MainWindow(QMainWindow):
                 self.agent.ai_provider._client = None
             self._refresh_status_panel()
 
+    def _open_personality_memory_dialog(self) -> None:
+        """Open the dedicated Personality & Permanent Personal Memory Management Dialog."""
+        dialog = PersonalityMemoryDialog(parent=self)
+        dialog.exec()
+
     def _open_memory_dialog(self) -> None:
         """Open the Phase 5 Persistent Memory Management Dialog."""
         dialog = MemoryManagementDialog(
             memory_manager=self.agent.memory_manager,
             parent=self,
         )
+        dialog.exec()
+
+    def _open_file_dialog(self) -> None:
+        """Open the File Intelligence & Applications Dialog."""
+        dialog = FileIntelligenceDialog(parent=self)
         dialog.exec()
 
     def _open_coding_agent_dialog(self) -> None:
@@ -1975,6 +2189,55 @@ class MainWindow(QMainWindow):
         dialog = CommunicationDialog(parent=self)
         dialog.exec()
 
+    def _open_integrations_dialog(self) -> None:
+        """Open the Universal Integrations Hub Dialog."""
+        dialog = IntegrationsDialog(parent=self)
+        dialog.exec()
+
+    def _handle_toggle_conversation_mode(self) -> None:
+        """Toggle continuous multi-turn conversation mode."""
+        if not self.agent.voice_pipeline:
+            self.voice_status_lbl.setText("Voice disabled")
+            return
+        pipeline = self.agent.voice_pipeline
+        is_active = pipeline.toggle_conversation_mode()
+        if is_active:
+            self.voice_conv_btn.setText("🛑 End Listening Session")
+            self.voice_conv_btn.setProperty("active", "true")
+            self.voice_conv_btn.style().unpolish(self.voice_conv_btn)
+            self.voice_conv_btn.style().polish(self.voice_conv_btn)
+            self.voice_status_lbl.setText("🎙️ Conversation Mode Active")
+            self.visualizer.set_voice_state("listening")
+        else:
+            self.voice_conv_btn.setText("🎙️ Start Voice Conversation")
+            self.voice_conv_btn.setProperty("active", "false")
+            self.voice_conv_btn.style().unpolish(self.voice_conv_btn)
+            self.voice_conv_btn.style().polish(self.voice_conv_btn)
+            status = (
+                "🎙️ Ready ('Hey Jarvis')"
+                if getattr(self.settings, "voice_wake_word_enabled", True)
+                else "Standby"
+            )
+            self.voice_status_lbl.setText(status)
+            self.visualizer.set_voice_state("idle")
+
+    def _handle_voice_interrupt(self) -> None:
+        """Instant barge-in stop for audio playback and spoken generation, preserving running agent tasks."""
+        if getattr(self.agent, "voice_pipeline", None):
+            self.agent.voice_pipeline.cancel_active_speech_and_generation()
+        if self._stream_worker and self._stream_worker.isRunning():
+            logger.info("Voice barge-in stopping active conversational text stream.")
+            self._stream_worker.cancel()
+            self.chat_panel.cancel_assistant_streaming()
+        self.visualizer.set_voice_state("interrupted")
+        self.voice_status_lbl.setText("Interrupted (Listening...)")
+
+    def _handle_voice_repeat(self) -> None:
+        """Replay the last spoken assistant response."""
+        if getattr(self, "_last_assistant_speech", None) and self.agent.voice_pipeline:
+            logger.info("Replaying last assistant spoken response.")
+            self.agent.voice_pipeline.speak(self._last_assistant_speech)
+
     def _handle_voice_ptt(self) -> None:
         """Handle Push-to-Talk activation."""
         if not self.agent.voice_pipeline:
@@ -1982,10 +2245,12 @@ class MainWindow(QMainWindow):
             return
         if self.agent.voice_pipeline.state.value == "recording":
             self.voice_status_lbl.setText("Transcribing...")
+            self.visualizer.set_voice_state("transcribing")
             self.agent.voice_pipeline._finish_recording_and_transcribe()
-            self.voice_ptt_btn.setText("🎙 Speak")
+            self.voice_ptt_btn.setText("🗣️ Speak")
         else:
-            self.voice_status_lbl.setText("🎙️ Listening...")
+            self.voice_status_lbl.setText("🎙️ Recording...")
+            self.visualizer.set_voice_state("recording")
             self.agent.voice_pipeline.trigger_push_to_talk()
             self.voice_ptt_btn.setText("⏹ Stop")
 
@@ -1999,13 +2264,15 @@ class MainWindow(QMainWindow):
             status = (
                 "🎙️ Ready ('Hey Jarvis')"
                 if getattr(self.settings, "voice_wake_word_enabled", True)
-                else ""
+                else "Standby"
             )
             self.voice_status_lbl.setText(status)
+            self.visualizer.set_voice_state("idle")
         else:
             self.agent.voice_pipeline.mute()
             self.voice_mute_btn.setText("🔇 Muted")
             self.voice_status_lbl.setText("Muted")
+            self.visualizer.set_voice_state("muted")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Handle clean window close, signal disconnection, and worker termination."""

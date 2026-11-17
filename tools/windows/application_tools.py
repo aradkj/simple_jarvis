@@ -25,7 +25,15 @@ class AppLaunchInput(BaseModel):
     """Input parameters for launching an approved application."""
 
     app_id: str = Field(
-        description="Application identifier or executable name from configured allowlist (e.g. 'notepad', 'calc', 'chrome', 'code')"
+        description="Application identifier or executable name from configured allowlist (e.g. 'notepad', 'calc', 'chrome', 'msedge', 'code')"
+    )
+    new_window: bool = Field(
+        default=False,
+        description="Whether to force opening a new application window if already running",
+    )
+    focus_if_running: bool = Field(
+        default=True,
+        description="Whether to bring existing window to foreground if application is already running",
     )
 
 
@@ -100,8 +108,12 @@ class WindowsAppLaunchTool(BaseTool):
             return ToolResult.cancelled("Application launch cancelled by user")
 
         app_id = getattr(params, "app_id", "")
+        new_window = getattr(params, "new_window", False)
+        focus_if_running = getattr(params, "focus_if_running", True)
         try:
-            res = self.service.launch_application(app_id)
+            res = self.service.launch_application(
+                app_id, new_window=new_window, focus_if_running=focus_if_running
+            )
             return ToolResult.success(data=res)
         except Exception as exc:
             return ToolResult.failed(f"Failed to launch application '{app_id}': {exc}")
@@ -112,18 +124,28 @@ class WindowsAppLaunchTool(BaseTool):
             name=cls.name,
             description=cls.description,
             category=cls.category,
-            risk_level=RiskLevel.HIGH,
+            risk_level=RiskLevel.LOW,
             parameters_schema={
                 "type": "object",
                 "properties": {
                     "app_id": {
                         "type": "string",
-                        "description": "Application identifier from allowlist (e.g. 'notepad', 'calc', 'chrome', 'code')",
-                    }
+                        "description": "Application identifier from allowlist (e.g. 'notepad', 'calc', 'chrome', 'msedge', 'code')",
+                    },
+                    "new_window": {
+                        "type": "boolean",
+                        "description": "Force new window opening",
+                        "default": False,
+                    },
+                    "focus_if_running": {
+                        "type": "boolean",
+                        "description": "Focus window if already running",
+                        "default": True,
+                    },
                 },
                 "required": ["app_id"],
             },
-            requires_approval=True,
+            requires_approval=False,
         )
 
 

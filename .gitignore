@@ -39,6 +39,7 @@ scratch/
 data/*.db
 data/*.sqlite3
 data/*.sqlite
+data/whatsapp_offline_queue.json
 !data/.gitkeep
 
 # Logs

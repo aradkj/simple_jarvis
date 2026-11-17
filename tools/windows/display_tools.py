@@ -109,3 +109,55 @@ class WindowsDisplaySetBrightnessTool(BaseTool):
             },
             requires_approval=False,
         )
+
+
+class ScreenshotInput(BaseModel):
+    """Input parameters for capturing a desktop screenshot."""
+
+    target_path: str | None = Field(
+        default=None,
+        description="Optional absolute destination path to save PNG screenshot. If omitted, saved to temporary directory.",
+    )
+
+
+class WindowsDesktopScreenshotTool(BaseTool):
+    """Tool to capture a screenshot of the active Windows desktop screen."""
+
+    name = "windows_desktop_screenshot"
+    description = "Capture an authorized screenshot of the active Windows desktop monitor and save it to a file."
+    category = PermissionCategory.WINDOWS_DISPLAY_READ
+    input_schema = ScreenshotInput
+
+    def __init__(self, service: WindowsControlService | None = None) -> None:
+        super().__init__()
+        self.service = service or WindowsControlService()
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        if context.is_cancelled():
+            return ToolResult.cancelled("Screenshot cancelled by user")
+
+        target_path = getattr(params, "target_path", None)
+        try:
+            res = self.service.capture_desktop_screenshot(target_path=target_path)
+            return ToolResult.success(data=res)
+        except Exception as exc:
+            return ToolResult.failed(f"Failed to capture desktop screenshot: {exc}")
+
+    @classmethod
+    def get_definition(cls) -> ToolDefinition:
+        return ToolDefinition(
+            name=cls.name,
+            description=cls.description,
+            category=cls.category,
+            risk_level=RiskLevel.LOW,
+            parameters_schema={
+                "type": "object",
+                "properties": {
+                    "target_path": {
+                        "type": "string",
+                        "description": "Optional file path to save screenshot",
+                    }
+                },
+            },
+            requires_approval=False,
+        )

@@ -201,6 +201,7 @@ class TestElevenLabsTTSService:
         mock_fallback.speak.return_value = True
 
         service = ElevenLabsTTSService(fallback_engine=mock_fallback, settings=settings)
+        service.provider.get_api_key = lambda: ""  # type: ignore[method-assign]
         service.preview_voice()
 
         mock_fallback.speak.assert_called_once()

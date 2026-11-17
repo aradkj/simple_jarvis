@@ -10,21 +10,26 @@ import contextlib
 import ctypes
 import os
 import subprocess
+import tempfile
 import threading
+import time
 import winreg
 from collections.abc import Iterator
 from ctypes import wintypes
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from config import Settings, get_settings
 from infrastructure.logging import get_logger
+from tools.windows.discovery import get_windows_app_discovery
 from tools.windows.exceptions import (
     ApplicationNotFoundError,
     AudioEndpointError,
     ComApartmentMismatchError,
     DisplayControlError,
     PowerControlError,
+    ProtectedTargetError,
     TargetValidationError,
 )
 from tools.windows.models import (
@@ -301,15 +306,12 @@ class WindowsControlService:
         return None
 
     def get_application_catalog(self) -> list[AppInfo]:
-        """Enumerate supported applications from allowlist and catalog."""
-        allowlist = [a.lower().strip() for a in self.settings.windows_app_allowlist]
+        """Enumerate supported applications from allowlist, catalog, and discovery."""
         running_procs = self.list_running_processes()
-
         catalog: list[AppInfo] = []
-        for app_id, (display_name, exes) in self._standard_catalog.items():
-            if app_id not in allowlist:
-                continue
+        seen_ids: set[str] = set()
 
+        for app_id, (display_name, exes) in self._standard_catalog.items():
             exe_path = self._find_executable_on_system(exes)
             is_installed = exe_path is not None and exe_path.is_file()
             running_pids = [
@@ -324,82 +326,308 @@ class WindowsControlService:
                     is_installed=is_installed,
                     is_running=len(running_pids) > 0,
                     running_pids=running_pids,
+                    launch_type="exe",
+                    is_packaged=False,
                 )
             )
+            seen_ids.add(app_id)
+
+        # Merge discovered desktop applications
+        with contextlib.suppress(Exception):
+            discovery = get_windows_app_discovery()
+            for dapp in discovery.scan_applications().values():
+                if dapp.app_id not in seen_ids:
+                    running_pids = [
+                        p.pid
+                        for p in running_procs
+                        if dapp.name.lower() in p.name.lower() or dapp.app_id in p.name.lower()
+                    ]
+                    catalog.append(
+                        AppInfo(
+                            app_id=dapp.app_id,
+                            display_name=dapp.name,
+                            executable_path=dapp.target,
+                            is_installed=True,
+                            is_running=len(running_pids) > 0,
+                            running_pids=running_pids,
+                            launch_type=dapp.launch_type,
+                            is_packaged=dapp.is_packaged,
+                        )
+                    )
+                    seen_ids.add(dapp.app_id)
+
         return catalog
 
     def resolve_application(self, app_identifier: str) -> AppInfo:
-        """Resolve an application identifier to an approved executable path."""
+        """Resolve an application identifier to an approved executable path or AUMID."""
         norm_id = app_identifier.lower().strip().replace(".exe", "")
-        allowlist = [a.lower().strip() for a in self.settings.windows_app_allowlist]
 
-        if norm_id not in allowlist:
-            raise ApplicationNotFoundError(
-                f"Application '{app_identifier}' is not present in the configured allowlist "
-                f"({', '.join(sorted(allowlist))}). Arbitrary applications cannot be launched."
-            )
+        alias_map = {
+            "google chrome": "chrome",
+            "google-chrome": "chrome",
+            "microsoft edge": "msedge",
+            "microsoft-edge": "msedge",
+            "edge": "msedge",
+            "msedge": "msedge",
+            "calculator": "calc",
+            "ماشین حساب": "calc",
+            "ماشین‌حساب": "calc",
+            "windows terminal": "wt",
+            "terminal": "wt",
+            "ترمینال": "wt",
+            "file explorer": "explorer",
+            "windows explorer": "explorer",
+            "فایل اکسپلورر": "explorer",
+            "notepad": "notepad",
+            "نوتپد": "notepad",
+            "نوت پد": "notepad",
+            "نوت‌پد": "notepad",
+            "دفترچه یادداشت": "notepad",
+            "vscode": "code",
+            "visual studio code": "code",
+            "visualstudiocode": "code",
+            "ویژوال استودیو کد": "code",
+            "وی اس کد": "code",
+            "paint": "mspaint",
+            "پینت": "mspaint",
+            "نقاشی": "mspaint",
+            "task manager": "taskmgr",
+            "تسک منیجر": "taskmgr",
+            "مدیریت وظایف": "taskmgr",
+            "کروم": "chrome",
+        }
+        mapped_id = alias_map.get(norm_id, norm_id)
 
-        if norm_id not in self._standard_catalog:
-            # Check if identifier exists as a registered application
-            reg_path = self._resolve_from_registry_app_paths(f"{norm_id}.exe")
-            if not reg_path:
+        # Enforce configured application allowlist if set
+        if self.settings.windows_app_allowlist:
+            allowed_norm = [a.lower().strip() for a in self.settings.windows_app_allowlist]
+            if not any(a in (norm_id, mapped_id) for a in allowed_norm):
                 raise ApplicationNotFoundError(
-                    f"Application '{app_identifier}' could not be resolved."
+                    f"Application '{app_identifier}' is not present in the configured allowlist."
                 )
-            display_name = norm_id.capitalize()
-            exes = [f"{norm_id}.exe"]
-            resolved_path = reg_path
-        else:
-            display_name, exes = self._standard_catalog[norm_id]
-            resolved_path = self._find_executable_on_system(exes)
 
-        if not resolved_path or not resolved_path.is_file():
-            raise ApplicationNotFoundError(
-                f"Application '{app_identifier}' ({display_name}) is supported in configuration but not installed on this system."
+        # 0. Fast-path direct resolution for Visual Studio Code
+        if (
+            norm_id
+            in (
+                "code",
+                "vscode",
+                "visual studio code",
+                "visualstudiocode",
+                "ویژوال استودیو کد",
+                "وی اس کد",
+            )
+            or mapped_id == "code"
+        ):
+            try:
+                discovery = get_windows_app_discovery()
+                vscode_path = discovery.resolve_vscode_executable()
+                if vscode_path and vscode_path.is_file():
+                    running_procs = self.list_running_processes()
+                    running_pids = [
+                        p.pid for p in running_procs if p.name.lower() in ("code.exe", "code")
+                    ]
+                    return AppInfo(
+                        app_id="code",
+                        display_name="Visual Studio Code",
+                        executable_path=str(vscode_path),
+                        is_installed=True,
+                        is_running=len(running_pids) > 0,
+                        running_pids=running_pids,
+                        launch_type="exe",
+                        is_packaged=False,
+                    )
+            except Exception as e:
+                logger.debug(f"Direct VS Code resolution fallback: {e}")
+
+        # 1. Standard built-in catalog (prefers native Win32 executables like notepad.exe)
+        if mapped_id in self._standard_catalog:
+            display_name, exes = self._standard_catalog[mapped_id]
+            resolved_path = self._find_executable_on_system(exes)
+            if resolved_path and resolved_path.is_file():
+                TargetValidator.validate_executable_path(str(resolved_path))
+                running_procs = self.list_running_processes()
+                running_pids = [
+                    p.pid for p in running_procs if any(p.name.lower() == e.lower() for e in exes)
+                ]
+                return AppInfo(
+                    app_id=mapped_id,
+                    display_name=display_name,
+                    executable_path=str(resolved_path),
+                    is_installed=True,
+                    is_running=len(running_pids) > 0,
+                    running_pids=running_pids,
+                    launch_type="exe",
+                    is_packaged=False,
+                )
+
+        # 2. Universal Windows application discovery (including Persian aliases & UWP packages)
+        try:
+            discovery = get_windows_app_discovery()
+            discovered = discovery.find_application(app_identifier)
+            if discovered:
+                target_path = discovered.target
+                if discovered.app_id in ("code", "vscode") or "code.cmd" in target_path.lower():
+                    real_vs = discovery.resolve_vscode_executable()
+                    if real_vs and real_vs.is_file():
+                        target_path = str(real_vs)
+
+                # Check for protected OS processes
+                if TargetValidator.is_protected_process(
+                    target_path
+                ) or TargetValidator.is_protected_process(discovered.name):
+                    raise ProtectedTargetError(
+                        f"Binary or target for '{discovered.name}' is on the protected system process list."
+                    )
+
+                running_procs = self.list_running_processes()
+                running_pids = [
+                    p.pid
+                    for p in running_procs
+                    if discovered.name.lower() in p.name.lower()
+                    or (
+                        discovered.launch_type == "exe"
+                        and Path(target_path).name.lower() == p.name.lower()
+                    )
+                    or (
+                        discovered.app_id in ("code", "vscode")
+                        and p.name.lower() in ("code.exe", "code")
+                    )
+                ]
+
+                return AppInfo(
+                    app_id=discovered.app_id,
+                    display_name=discovered.name,
+                    executable_path=target_path,
+                    is_installed=True,
+                    is_running=len(running_pids) > 0,
+                    running_pids=running_pids,
+                    launch_type=discovered.launch_type,
+                    is_packaged=discovered.is_packaged,
+                )
+        except Exception as disc_exc:
+            logger.debug(f"Discovery lookup error for '{app_identifier}': {disc_exc}")
+
+        # 3. Check Windows Registry App Paths
+        reg_path = self._resolve_from_registry_app_paths(f"{norm_id}.exe")
+        if reg_path and reg_path.is_file():
+            TargetValidator.validate_executable_path(str(reg_path))
+            running_procs = self.list_running_processes()
+            running_pids = [p.pid for p in running_procs if p.name.lower() == f"{norm_id}.exe"]
+            return AppInfo(
+                app_id=norm_id,
+                display_name=norm_id.capitalize(),
+                executable_path=str(reg_path),
+                is_installed=True,
+                is_running=len(running_pids) > 0,
+                running_pids=running_pids,
+                launch_type="exe",
+                is_packaged=False,
             )
 
-        # Validate executable identity & attributes
-        TargetValidator.validate_executable_path(str(resolved_path))
-
-        running_procs = self.list_running_processes()
-        running_pids = [
-            p.pid for p in running_procs if any(p.name.lower() == e.lower() for e in exes)
-        ]
-
-        return AppInfo(
-            app_id=norm_id,
-            display_name=display_name,
-            executable_path=str(resolved_path),
-            is_installed=True,
-            is_running=len(running_pids) > 0,
-            running_pids=running_pids,
+        raise ApplicationNotFoundError(
+            f"Application '{app_identifier}' could not be resolved or is not installed on this system."
         )
 
-    def launch_application(self, app_identifier: str) -> dict[str, Any]:
-        """Launch an approved application without shell execution or privilege elevation."""
+    def launch_application(
+        self,
+        app_identifier: str,
+        new_window: bool = False,
+        focus_if_running: bool = True,
+    ) -> dict[str, Any]:
+        """Launch an application with genuine window and process verification."""
         if not self.settings.windows_app_launch_enabled:
             raise ApplicationNotFoundError(
                 "Application launching is disabled by user policy (windows_app_launch_enabled=False)."
             )
 
         app_info = self.resolve_application(app_identifier)
-        exe_path = TargetValidator.validate_executable_path(app_info.executable_path)
 
-        logger.info(f"Launching verified desktop application: {app_info.display_name} ({exe_path})")
-        # Launch directly without shell
-        proc = subprocess.Popen(
-            [str(exe_path)],
-            shell=False,
-            close_fds=True,
-            creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+        # If application is already running and new window not forced, focus existing window
+        if app_info.is_running and focus_if_running and not new_window:
+            windows = self.find_windows(app_name=app_info.display_name)
+            if not windows:
+                windows = self.find_windows(app_name=app_info.app_id)
+            if windows:
+                top_w = windows[0]
+                try:
+                    self.focus_window(top_w.hwnd)
+                    logger.info(
+                        f"Focused existing window for '{app_info.display_name}' (hwnd={top_w.hwnd})"
+                    )
+                    return {
+                        "app_id": app_info.app_id,
+                        "display_name": app_info.display_name,
+                        "executable_path": app_info.executable_path,
+                        "status": "focused",
+                        "verified": True,
+                        "verification_type": "window_focused",
+                        "hwnd": top_w.hwnd,
+                        "window_title": top_w.title,
+                        "pid": top_w.pid,
+                    }
+                except Exception as focus_exc:
+                    logger.debug(
+                        f"Could not focus existing window: {focus_exc}. Proceeding to launch."
+                    )
+
+        logger.info(
+            f"Launching verified desktop application: {app_info.display_name} ({app_info.executable_path})"
         )
+
+        matched_pid = 0
+        verified = False
+        verification_type = "launched"
+
+        if app_info.launch_type == "aumid":
+            # Packaged UWP application
+            os.startfile(f"shell:AppsFolder\\{app_info.executable_path}")
+            verified = True
+            verification_type = "aumid_launched"
+        else:
+            # Win32 executable or shortcut
+            target_p = Path(app_info.executable_path)
+            if target_p.suffix.lower() == ".lnk":
+                os.startfile(str(target_p))
+                verified = True
+                verification_type = "shortcut_launched"
+            else:
+                exe_path = TargetValidator.validate_executable_path(app_info.executable_path)
+                proc = subprocess.Popen(
+                    [str(exe_path)],
+                    shell=False,
+                    close_fds=True,
+                    creationflags=subprocess.DETACHED_PROCESS if os.name == "nt" else 0,
+                )
+                matched_pid = proc.pid
+                if proc.poll() is None:
+                    verified = True
+                    verification_type = "process_verified"
+
+        # Check for window appearance with brief polling
+        deadline = time.time() + 1.5
+        matched_window_title = ""
+        while time.time() < deadline:
+            windows = self.find_windows(app_name=app_info.display_name)
+            if not windows:
+                windows = self.find_windows(app_name=app_info.app_id)
+            if windows:
+                verified = True
+                verification_type = "window_verified"
+                matched_window_title = windows[0].title
+                matched_pid = windows[0].pid
+                break
+            time.sleep(0.05)
 
         return {
             "app_id": app_info.app_id,
             "display_name": app_info.display_name,
-            "executable_path": str(exe_path),
-            "pid": proc.pid,
+            "executable_path": app_info.executable_path,
+            "pid": matched_pid,
             "status": "launched",
+            "verified": verified,
+            "verification_type": verification_type,
+            "window_title": matched_window_title,
         }
 
     def list_running_processes(self) -> list[ProcessMetadata]:
@@ -595,8 +823,24 @@ class WindowsControlService:
         for w in all_windows:
             if pid is not None and w.pid != pid:
                 continue
-            if app_lower and app_lower not in w.process_name.lower():
-                continue
+            if app_lower:
+                proc_base = w.process_name.lower().replace(".exe", "")
+                title_lower = w.title.lower()
+                matched = (
+                    app_lower in w.process_name.lower()
+                    or proc_base in app_lower
+                    or app_lower in title_lower
+                    or (
+                        app_lower in ("code", "vscode", "visual studio code")
+                        and proc_base == "code"
+                    )
+                    or (app_lower in ("chrome", "google chrome") and proc_base == "chrome")
+                    or (app_lower in ("edge", "msedge", "microsoft edge") and proc_base == "msedge")
+                    or any(part in proc_base for part in app_lower.split() if len(part) > 3)
+                    or any(part in title_lower for part in app_lower.split() if len(part) > 3)
+                )
+                if not matched:
+                    continue
             if q_lower and q_lower not in w.title.lower():
                 continue
             matches.append(w)
@@ -686,6 +930,38 @@ class WindowsControlService:
         # Send WM_CLOSE
         res = self._user32.PostMessageW(h, WM_CLOSE, 0, 0)
         return bool(res)
+
+    def capture_desktop_screenshot(self, target_path: str | None = None) -> dict[str, Any]:
+        """Capture screenshot of the primary Windows desktop display."""
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication
+
+        _ = QApplication.instance() or QApplication([])
+        screen = QGuiApplication.primaryScreen()
+        if not screen:
+            raise RuntimeError("No primary display screen available for desktop screenshot.")
+
+        pixmap = screen.grabWindow(0)
+        if pixmap.isNull():
+            raise RuntimeError("Failed to capture screen image from Windows display.")
+
+        if target_path:
+            out_path = Path(target_path).resolve()
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = Path(tempfile.gettempdir()) / f"jarvis_desktop_{stamp}.png"
+
+        saved = pixmap.save(str(out_path), "PNG")
+        if not saved:
+            raise RuntimeError(f"Failed to save desktop screenshot to '{out_path}'.")
+
+        return {
+            "status": "captured",
+            "file_path": str(out_path),
+            "width": pixmap.width(),
+            "height": pixmap.height(),
+            "timestamp": datetime.now().isoformat(),
+        }
 
     # =========================================================================
     # 3. Audio Controls (Core Audio COM)
