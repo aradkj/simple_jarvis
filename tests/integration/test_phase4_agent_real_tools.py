@@ -112,13 +112,21 @@ def test_agent_executes_real_file_inspection_in_authorized_directory(tmp_path):
         }
     )
 
-    mock_pm.generate_text.side_effect = [
-        AIResponse(text=plan_json, model="gemini-3.8-flash"),
-        AIResponse(
+    def _mock_generate(prompt=None, *args, **kwargs):
+        p = str(prompt or "")
+        if (
+            "plan" in p.lower()
+            or "decomposition" in p.lower()
+            or "json" in p.lower()
+            or "goal" in p.lower()
+        ):
+            return AIResponse(text=plan_json, model="gemini-3.8-flash")
+        return AIResponse(
             text="The brief states Phase 4 is in progress.",
             model="gemini-3.8-flash",
-        ),
-    ]
+        )
+
+    mock_pm.generate_text.side_effect = _mock_generate
 
     agent = JARVISAgent(ai_provider=mock_pm)
     redacted_text = "Project Jarvis status: Phase 4 in progress. Secret key: [REDACTED_API_KEY]"
@@ -127,9 +135,20 @@ def test_agent_executes_real_file_inspection_in_authorized_directory(tmp_path):
     outcome = agent.process_agent_task(f"Read {note_file} and summarize")
 
     assert outcome.status == "completed"
-    read_step = outcome.plan.steps[0]
+    read_step = next(
+        (s for s in outcome.plan.steps if s.tool_name == "file_read_text"),
+        outcome.plan.steps[0],
+    )
     assert read_step.status.value == "completed"
-    content = read_step.result["content"]
+    if isinstance(read_step.result, dict):
+        content = read_step.result.get("content", "")
+    elif isinstance(read_step.result, str):
+        try:
+            content = json.loads(read_step.result).get("content", read_step.result)
+        except Exception:
+            content = read_step.result
+    else:
+        content = ""
     assert "Phase 4 in progress" in content
     # Verify secret key was redacted
     assert "AIzaSy" not in content

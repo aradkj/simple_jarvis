@@ -2757,7 +2757,7 @@ class AgentPlanner:
                 "dependencies": [],
             }
 
-        # 3. File Inspect Intent
+        # 3. File Inspect and Safe Read Intent
         is_inspect = any(
             k in norm
             for k in (
@@ -2770,7 +2770,39 @@ class AgentPlanner:
                 "پیش نمایش",
             )
         ) and any(k in norm for k in ("file", "فایل", ".txt", ".py", ".md", ".json"))
-        if "file_inspect" in tool_names and is_inspect:
+
+        is_read_text = (
+            any(
+                k in norm
+                for k in (
+                    "read",
+                    "بخوان",
+                    "بخون",
+                    "خواندن فایل",
+                    "خوندن فایل",
+                    "متن فایل",
+                )
+            )
+            and any(
+                k in norm
+                for k in (
+                    "file",
+                    "فایل",
+                    ".txt",
+                    ".py",
+                    ".md",
+                    ".json",
+                    ".log",
+                    ".csv",
+                    "brief",
+                    "note",
+                )
+            )
+        ) or is_inspect
+
+        if ("file_read_text" in tool_names or "file_inspect" in tool_names) and (
+            is_read_text or is_inspect
+        ):
             target = ""
             for q in ('"', "'", "«", "»"):
                 if q in goal:
@@ -2779,15 +2811,31 @@ class AgentPlanner:
                         if "." in p.strip():
                             target = p.strip()
                             break
+                    if target:
+                        break
+            if not target:
+                path_match = re.search(r'([A-Za-z]:\\[^\s"\']+|\/[^\s"\']+)', goal)
+                if path_match:
+                    target = path_match.group(1).rstrip(".,;")
             if not target:
                 target = norm
-            return {
-                "description": f"Inspect file '{target}'",
-                "step_type": "tool_call",
-                "tool_name": "file_inspect",
-                "parameters": {"file_path": target},
-                "dependencies": [],
-            }
+
+            if "file_read_text" in tool_names and is_read_text:
+                return {
+                    "description": f"Read safe text content from '{target}'",
+                    "step_type": "tool_call",
+                    "tool_name": "file_read_text",
+                    "parameters": {"file_path": target},
+                    "dependencies": [],
+                }
+            elif "file_inspect" in tool_names:
+                return {
+                    "description": f"Inspect file '{target}'",
+                    "step_type": "tool_call",
+                    "tool_name": "file_inspect",
+                    "parameters": {"file_path": target},
+                    "dependencies": [],
+                }
 
         return None
 
