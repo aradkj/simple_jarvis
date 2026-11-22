@@ -22,7 +22,7 @@ def test_cli_discovery(tmp_path: Path):
     if not cli.is_available():
         mock_agy = tmp_path / "agy.exe"
         mock_agy.write_text("@echo off\n", encoding="utf-8")
-        cli.executable_path = mock_agy
+        cli = AntigravityCLI(executable_path=mock_agy)
         with patch.object(cli, "detect_version", return_value="1.5.10"):
             exe = cli.locate_executable()
             assert exe.is_file()
@@ -130,6 +130,7 @@ def test_adapter_operations(tmp_path: Path):
     if not adapter.cli.is_available():
         mock_agy = tmp_path / "agy.exe"
         mock_agy.write_text("@echo off\n", encoding="utf-8")
+        adapter.cli.explicit_path = mock_agy
         adapter.cli.executable_path = mock_agy
         with patch.object(adapter.cli, "detect_version", return_value="1.5.10"):
             assert adapter.connect() is True

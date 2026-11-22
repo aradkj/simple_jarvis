@@ -40,6 +40,15 @@ class AntigravityCLI:
         self._active_processes: dict[str, subprocess.Popen[str]] = {}
         self._lock = threading.RLock()
 
+    @property
+    def executable_path(self) -> Path | None:
+        """Alias property for explicit_path to support flexible configuration."""
+        return self.explicit_path
+
+    @executable_path.setter
+    def executable_path(self, path: str | Path | None) -> None:
+        self.explicit_path = Path(path) if path else None
+
     def locate_executable(self) -> Path:
         """Locate agy.exe on the system."""
         if self.explicit_path and self.explicit_path.is_file():

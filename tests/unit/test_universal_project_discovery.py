@@ -16,26 +16,36 @@ from core.files.project_resolver import ProjectResolver
 @pytest.fixture
 def resolver(tmp_path: Path) -> ProjectResolver:
     res = ProjectResolver()
-    if not Path("C:/docker/pc-shop").is_dir():
-        pc_shop_dir = tmp_path / "pc-shop"
-        pc_shop_dir.mkdir(parents=True, exist_ok=True)
-        (pc_shop_dir / ".git").mkdir(exist_ok=True)
-        (pc_shop_dir / "package.json").write_text('{"name": "pc-shop"}', encoding="utf-8")
+    pc_shop_dir = tmp_path / "pc-shop"
+    pc_shop_dir.mkdir(parents=True, exist_ok=True)
+    (pc_shop_dir / ".git").mkdir(exist_ok=True)
+    (pc_shop_dir / "package.json").write_text('{"name": "pc-shop"}', encoding="utf-8")
 
-        warehouse_dir = tmp_path / "warehouse"
-        warehouse_dir.mkdir(parents=True, exist_ok=True)
-        (warehouse_dir / ".git").mkdir(exist_ok=True)
-        (warehouse_dir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    warehouse_dir = tmp_path / "warehouse"
+    warehouse_dir.mkdir(parents=True, exist_ok=True)
+    (warehouse_dir / ".git").mkdir(exist_ok=True)
+    (warehouse_dir / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (warehouse_dir / "README.md").write_text(
+        "# Warehouse Management\nBuilt with FastAPI and SQLAlchemy", encoding="utf-8"
+    )
 
-        ocr_dir = tmp_path / "OCR"
-        ocr_dir.mkdir(parents=True, exist_ok=True)
-        (ocr_dir / ".git").mkdir(exist_ok=True)
-        (ocr_dir / "README.md").write_text(
-            "# Document Processing Platform\nOCR engine", encoding="utf-8"
-        )
+    ocr_dir = tmp_path / "OCR"
+    ocr_dir.mkdir(parents=True, exist_ok=True)
+    (ocr_dir / ".git").mkdir(exist_ok=True)
+    (ocr_dir / "README.md").write_text(
+        "# Document Processing Platform\nOCR engine", encoding="utf-8"
+    )
 
-        res.get_candidate_roots = lambda: [tmp_path]
-        res._cached_projects.clear()
+    jarvis_dir = tmp_path / "jarvis"
+    jarvis_dir.mkdir(parents=True, exist_ok=True)
+    (jarvis_dir / ".git").mkdir(exist_ok=True)
+    (jarvis_dir / "pyproject.toml").write_text(
+        '[project]\nname = "jarvis"\ndescription = "JARVIS Personal AI Agent"\ndependencies = ["fastapi", "pyside6"]\n',
+        encoding="utf-8",
+    )
+
+    res.get_candidate_roots = lambda: [tmp_path, Path.cwd()]
+    res._cached_projects.clear()
     return res
 
 
