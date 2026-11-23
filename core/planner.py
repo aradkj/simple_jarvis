@@ -635,6 +635,7 @@ class AgentPlanner:
             "file_search",
             "file_open",
             "file_inspect",
+            "file_read_text",
             "coding_agent_status",
             "file_create_directory",
         }
@@ -1112,18 +1113,72 @@ class AgentPlanner:
                 "dependencies": [],
             }
 
-        # 2. Application Launching (supports single and multiple apps like Chrome & Edge)
-        launch_cues = (
-            "open",
-            "launch",
-            "start",
-            "run",
-            "باز کن",
-            "بازکن",
-            "اجرا کن",
-            "بالا بیار",
-            "استارت بزن",
+        # Guard: Explicitly ignore file inspection, reading, or modification from being hijacked as app launch
+        is_file_request = (
+            any(
+                k in norm
+                for k in (
+                    "read",
+                    "بخوان",
+                    "بخون",
+                    "خواندن",
+                    "خوندن",
+                    "inspect",
+                    "محتوا",
+                    "محتوای",
+                    "write",
+                    "بنویس",
+                    "save file",
+                    "create file",
+                    "ساخت فایل",
+                    "ایجاد فایل",
+                )
+            )
+            and any(
+                k in norm
+                for k in (
+                    ".txt",
+                    ".py",
+                    ".json",
+                    ".md",
+                    ".log",
+                    ".csv",
+                    ".html",
+                    "brief",
+                    "note",
+                    "file",
+                    "فایل",
+                )
+            )
+            and not any(
+                k in norm
+                for k in (
+                    "editor",
+                    "ادیتور",
+                    "vscode",
+                    "vs code",
+                    "notepad",
+                    "نوتپد",
+                    "application",
+                    "برنامه",
+                )
+            )
         )
+        if is_file_request:
+            return None
+
+        # 2. Application Launching (supports single and multiple apps like Chrome & Edge)
+        launch_cues_regex = [
+            r"\bopen\b",
+            r"\blaunch\b",
+            r"\bstart\b",
+            r"\brun\b",
+            r"باز\s*کن",
+            r"بازکن",
+            r"اجرا\s*کن",
+            r"بالا\s*بیار",
+            r"استارت\s*بزن",
+        ]
         coding_implied = (
             "need to code",
             "want to code",
@@ -1141,11 +1196,20 @@ class AgentPlanner:
             "کدنویسی کنیم",
         )
         is_coding_implied = any(c in norm for c in coding_implied)
-        is_launch = any(w in norm for w in launch_cues) or is_coding_implied
+        is_launch = (
+            any(re.search(pat, norm, re.IGNORECASE) for pat in launch_cues_regex)
+            or is_coding_implied
+        )
 
         # 3. Application Closing
-        close_cues = ("close", "ببند", "ببندش", "خارج شو", "kill", "قطع کن", "ببندیم")
-        is_close = any(w in norm for w in close_cues)
+        close_cues_regex = [
+            r"\bclose\b",
+            r"\bkill\b",
+            r"ببند(?:ش|یم)?",
+            r"خارج\s*شو",
+            r"قطع\s*کن",
+        ]
+        is_close = any(re.search(pat, norm, re.IGNORECASE) for pat in close_cues_regex)
 
         apps_map = [
             ("chrome", ("chrome", "کروم", "گوگل کروم", "google chrome", "google-chrome")),
@@ -1334,19 +1398,50 @@ class AgentPlanner:
 
             # Check Universal Windows Application Discovery if not matched in standard list
             if not matched_apps:
-                try:
-                    from tools.windows.discovery import get_windows_app_discovery
+                looks_like_file_or_path = (
+                    ":\\" in norm
+                    or ":/" in norm
+                    or "/" in norm
+                    or "\\" in norm
+                    or any(
+                        norm.endswith(ext)
+                        for ext in (
+                            ".txt",
+                            ".py",
+                            ".md",
+                            ".json",
+                            ".html",
+                            ".log",
+                            ".csv",
+                            ".pdf",
+                            ".docx",
+                        )
+                    )
+                )
+                if not looks_like_file_or_path:
+                    try:
+                        from tools.windows.discovery import get_windows_app_discovery
 
-                    disc = get_windows_app_discovery()
-                    clean_target = norm
-                    for cue in launch_cues:
-                        clean_target = clean_target.replace(cue, " ")
-                    clean_target = " ".join(clean_target.split())
-                    found = disc.find_application(clean_target)
-                    if found:
-                        matched_apps.append(found.app_id)
-                except Exception:
-                    pass
+                        disc = get_windows_app_discovery()
+                        clean_target = norm
+                        for cue in (
+                            "open",
+                            "launch",
+                            "start",
+                            "run",
+                            "باز کن",
+                            "بازکن",
+                            "اجرا کن",
+                            "بالا بیار",
+                        ):
+                            clean_target = clean_target.replace(cue, " ")
+                        clean_target = " ".join(clean_target.split())
+                        if clean_target and len(clean_target) > 1:
+                            found = disc.find_application(clean_target)
+                            if found:
+                                matched_apps.append(found.app_id)
+                    except Exception:
+                        pass
 
             if matched_apps:
                 steps: list[dict[str, Any]] = []
@@ -1380,7 +1475,7 @@ class AgentPlanner:
 
                     disc = get_windows_app_discovery()
                     clean_target = norm
-                    for cue in close_cues:
+                    for cue in ("close", "ببند", "ببندش", "خارج شو", "kill", "قطع کن"):
                         clean_target = clean_target.replace(cue, " ")
                     clean_target = " ".join(clean_target.split())
                     found = disc.find_application(clean_target)
@@ -2870,7 +2965,22 @@ class AgentPlanner:
                 "parameters": {"command_id": "git_log", "parameters": {"limit": 10}},
                 "dependencies": [],
             }
-        elif any(k in norm for k in ("تست ها را اجرا کن", "اجرای تست", "run tests", "pytest")):
+        is_run_tests = (
+            any(
+                k in norm
+                for k in (
+                    "تست ها را اجرا کن",
+                    "اجرای تست",
+                    "run tests",
+                    "run test",
+                    "run pytest",
+                    "execute tests",
+                )
+            )
+            or norm.strip() in ("pytest", "run tests", "run pytest", "test", "تست")
+            or bool(re.search(r"\b(?:run|execute)\s+pytest\b", norm, re.IGNORECASE))
+        )
+        if is_run_tests:
             return {
                 "description": "Run pytest test suite",
                 "step_type": "tool_call",
@@ -3098,6 +3208,12 @@ class AgentPlanner:
             steps.append(wa_step)
         elif email_step := self._detect_email_intent(goal, tool_names):
             steps.append(email_step)
+        # Priority 1.7: Check File Intelligence (search, open, inspect, read)
+        elif file_intel_step := self._detect_file_intelligence_intent(goal, tool_names):
+            steps.append(file_intel_step)
+        # Priority 1.8: Check file modification & document extraction intent
+        elif file_step := self._detect_file_modification_intent(goal, tool_names):
+            steps.append(file_step)
         # Priority 2: Windows Desktop & Multi-Application Actions
         elif desk_res := self._detect_desktop_intent(goal, tool_names, session_id=session_id):
             if isinstance(desk_res, list):
@@ -3118,12 +3234,6 @@ class AgentPlanner:
         # Priority 8: Check terminal intent
         elif term_step := self._detect_terminal_intent(goal, tool_names):
             steps.append(term_step)
-        # Priority 9: Check File Intelligence (search, open, inspect)
-        elif file_intel_step := self._detect_file_intelligence_intent(goal, tool_names):
-            steps.append(file_intel_step)
-        # Priority 10: Check file modification & document extraction intent
-        elif file_step := self._detect_file_modification_intent(goal, tool_names):
-            steps.append(file_step)
         # Priority 10: Check browser agent legacy intent
         elif browser_step := self._detect_browser_intent(goal, tool_names):
             steps.append(browser_step)

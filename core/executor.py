@@ -1138,6 +1138,10 @@ class AgentExecutor:
                             fallback_msg = (
                                 f"Folder '{dir_name}' created successfully at {dir_path}."
                             )
+                    elif t_name in ("file_read_text", "file_inspect"):
+                        fn = tool_data.get("filename", "file")
+                        ct = tool_data.get("content", "")
+                        fallback_msg = f"File '{fn}' read successfully:\n{ct}"
                     elif t_name == "windows_desktop_screenshot":
                         f_path = tool_data.get("file_path", "screenshot.png")
                         fallback_msg = (

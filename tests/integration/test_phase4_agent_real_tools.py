@@ -115,10 +115,10 @@ def test_agent_executes_real_file_inspection_in_authorized_directory(tmp_path):
     def _mock_generate(prompt=None, *args, **kwargs):
         p = str(prompt or "")
         if (
-            "plan" in p.lower()
-            or "decomposition" in p.lower()
-            or "json" in p.lower()
-            or "goal" in p.lower()
+            "task decomposition planner" in p.lower()
+            or "structured json execution plan" in p.lower()
+            or "json object matching this exact structure" in p.lower()
+            or "rules:\n1. maximum" in p.lower()
         ):
             return AIResponse(text=plan_json, model="gemini-3.8-flash")
         return AIResponse(
@@ -135,24 +135,16 @@ def test_agent_executes_real_file_inspection_in_authorized_directory(tmp_path):
     outcome = agent.process_agent_task(f"Read {note_file} and summarize")
 
     assert outcome.status == "completed"
-    read_step = next(
-        (s for s in outcome.plan.steps if s.tool_name == "file_read_text"),
-        outcome.plan.steps[0],
-    )
+    assert any(s.tool_name == "file_read_text" for s in outcome.plan.steps)
+    read_step = next(s for s in outcome.plan.steps if s.tool_name == "file_read_text")
     assert read_step.status.value == "completed"
-    if isinstance(read_step.result, dict):
-        content = read_step.result.get("content", "")
-    elif isinstance(read_step.result, str):
-        try:
-            content = json.loads(read_step.result).get("content", read_step.result)
-        except Exception:
-            content = read_step.result
-    else:
-        content = ""
+    assert isinstance(read_step.result, dict)
+    content = read_step.result["content"]
     assert "Phase 4 in progress" in content
     # Verify secret key was redacted
     assert "AIzaSy" not in content
     assert "[REDACTED_API_KEY]" in content
+    assert "Phase 4 is in progress" in outcome.final_response
 
     # Clean up
     path_sec.clear_all()
@@ -196,3 +188,61 @@ def test_agent_rejects_unauthorized_file_access(tmp_path):
     # The recovery synthesis step is executed so the user receives a graceful explanation
     assert outcome.status == "completed"
     assert agent.state == AgentState.COMPLETED
+
+
+def test_agent_executes_real_file_inspection_with_runneradmin_pytest_path(tmp_path):
+    """Regression test: verifies that runner paths containing 'runneradmin' and 'pytest-of-'
+
+    do not inadvertently trigger windows_app_launch or terminal_execute_command, and that
+    actual file content is read from disk and propagated to both tool result and final response.
+    """
+    runner_simulated_dir = tmp_path / "pytest-of-runneradmin" / "test_runner0" / "notes"
+    runner_simulated_dir.mkdir(parents=True, exist_ok=True)
+    note_file = runner_simulated_dir / "brief.txt"
+    note_file.write_text(
+        "Project Jarvis status: Phase 4 in progress. Secret key: AIzaSyA1B2C3D4E5F6G7H8I9J0K1L2M3N4O5P6",
+        encoding="utf-8",
+    )
+
+    path_sec = get_path_security_service()
+    path_sec.clear_all()
+    path_sec.add_directory(str(runner_simulated_dir), display_name="RunnerNotes")
+
+    mock_pm = MagicMock()
+    mock_pm.is_ready.return_value = True
+
+    def _mock_generate(prompt=None, *args, **kwargs):
+        return AIResponse(
+            text="The brief states Phase 4 is in progress.",
+            model="gemini-3.8-flash",
+        )
+
+    mock_pm.generate_text.side_effect = _mock_generate
+
+    agent = JARVISAgent(ai_provider=mock_pm)
+    redacted_text = "Project Jarvis status: Phase 4 in progress. Secret key: [REDACTED_API_KEY]"
+    fp = path_sec.compute_content_fingerprint(redacted_text)
+    agent.authorize_cloud_transmission(agent.active_session_id, "cloud_provider", fp)
+
+    outcome = agent.process_agent_task(f"Read {note_file} and summarize")
+
+    assert outcome.status == "completed"
+    # Ensure no desktop or terminal hijacking occurred
+    assert not any(s.tool_name == "windows_app_launch" for s in outcome.plan.steps)
+    assert not any(s.tool_name == "terminal_execute_command" for s in outcome.plan.steps)
+
+    # Must have the real file_read_text tool step executed
+    assert any(s.tool_name == "file_read_text" for s in outcome.plan.steps)
+    read_step = next(s for s in outcome.plan.steps if s.tool_name == "file_read_text")
+    assert read_step.status.value == "completed"
+    assert isinstance(read_step.result, dict)
+    content = read_step.result["content"]
+
+    # Must contain actual file content, not reasoning text
+    assert "Phase 4 in progress" in content
+    assert not content.startswith("Reasoned:")
+    assert "AIzaSy" not in content
+    assert "[REDACTED_API_KEY]" in content
+
+    # Clean up
+    path_sec.clear_all()
