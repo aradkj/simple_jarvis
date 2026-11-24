@@ -21,6 +21,12 @@ class ScoredMemory:
     recency_score: float
     confidence_score: float
     project_boost: float
+    vector_score: float = 0.0
+
+    @property
+    def score(self) -> float:
+        """Convenience alias for total_score."""
+        return self.total_score
 
 
 class MemoryRanker:
@@ -89,11 +95,19 @@ class MemoryRanker:
         base_keyword_score: float | None = None,
     ) -> ScoredMemory:
         """Calculate total deterministic relevance score for a memory record."""
-        # 1. Keyword / Lexical Score
+        # 1. Keyword / Lexical Score & Semantic Vector Fusion (Section 6.3)
         if base_keyword_score is not None:
             kw_score = max(0.0, min(1.0, base_keyword_score))
         else:
             kw_score = self.compute_keyword_similarity(query, record.content, record.key)
+
+        vec_sim: float = 0.0
+        if isinstance(record.metadata, dict) and "vector_similarity" in record.metadata:
+            vec_sim = max(0.0, min(1.0, float(record.metadata["vector_similarity"])))
+            # Hybrid fusion: 50% lexical overlap + 50% vector semantic similarity
+            relevance_score = (0.5 * kw_score) + (0.5 * vec_sim)
+        else:
+            relevance_score = kw_score
 
         # 2. Importance Score
         imp_score = max(0.0, min(1.0, record.importance))
@@ -110,7 +124,7 @@ class MemoryRanker:
             p_boost = self.project_boost
 
         raw_total = (
-            (kw_score * self.w_rel)
+            (relevance_score * self.w_rel)
             + (imp_score * self.w_imp)
             + (rec_score * self.w_rec)
             + (conf_score * self.w_conf)
@@ -127,7 +141,22 @@ class MemoryRanker:
             recency_score=round(rec_score, 4),
             confidence_score=round(conf_score, 4),
             project_boost=p_boost,
+            vector_score=round(vec_sim, 4),
         )
+
+    def score_memory(
+        self,
+        query: str,
+        memory: MemoryRecord,
+        current_project_id: str | None = None,
+        vector_similarity: float | None = None,
+    ) -> ScoredMemory:
+        """Convenience wrapper for score_record with optional vector similarity injection."""
+        if vector_similarity is not None:
+            if not isinstance(memory.metadata, dict):
+                memory.metadata = {}
+            memory.metadata["vector_similarity"] = vector_similarity
+        return self.score_record(memory, query, current_project_id=current_project_id)
 
     def rank_records(
         self,

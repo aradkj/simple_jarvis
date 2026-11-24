@@ -13,6 +13,7 @@ from core.conversation_session import (
     ConversationSessionManager,
     get_conversation_session_manager,
 )
+from core.decision import DecisionEngine
 from core.events import AgentEvent, AgentEventType, EventBus
 from core.execution_context import ExecutionContext
 from core.executor import AgentExecutor, ExecutionOutcome
@@ -23,6 +24,7 @@ from core.permissions import (
 )
 from core.personality import JarvisPersonalityEngine
 from core.planner import AgentPlanner, Plan
+from core.reasoning import MultiStepProblemSolver
 from core.state_machine import AgentState, AgentStateMachine
 from core.task_manager import TaskManager
 from core.task_orchestrator import (
@@ -253,6 +255,10 @@ class JARVISAgent:
             event_bus=self.event_bus
         )
         self.capability_registry: CapabilityRegistry = get_capability_registry()
+
+        # Phase B Deep Reasoning & Bounded Decision Engine (Section 7 & 8)
+        self.reasoning_solver = MultiStepProblemSolver()
+        self.decision_engine = DecisionEngine()
 
         # Phase 3 Deterministic State Machine
         self.state_machine = AgentStateMachine(
@@ -817,6 +823,51 @@ class JARVISAgent:
             TaskLifecycleState.UNDERSTANDING,
             reason="Analyzing user intent and resolving conversational context",
         )
+
+        # Phase B Deep Reasoning & Decision Engine Integration (Section 7 & 8)
+        try:
+            persian_interp = inferred.get("persian_understanding")
+            reasoning_res = self.reasoning_solver.solve(
+                goal=resolved_goal,
+                semantic_interp=persian_interp.to_semantic_interpretation()
+                if hasattr(persian_interp, "to_semantic_interpretation")
+                else None,
+                context={
+                    "session_id": active_session,
+                    "active_project": inferred.get("active_project"),
+                    "read_only": bool(inferred.get("read_only")),
+                },
+            )
+            if reasoning_res.get("decision_record"):
+                dec_rec = reasoning_res["decision_record"]
+                orchestrated_task.metadata["decision_record"] = dec_rec.model_dump()
+                ctx.metadata["decision_record"] = dec_rec
+                ctx.metadata["calibrated_confidence"] = reasoning_res.get("confidence_score", 1.0)
+
+            # If ambiguity materially impacts correctness and clarification is required:
+            if (
+                reasoning_res.get("requires_clarification")
+                and inferred.get("is_ambiguous")
+                and reasoning_res.get("clarification_prompt")
+            ):
+                self.state_machine.transition_to(
+                    AgentState.WAITING_FOR_CLARIFICATION,
+                    reason="Ambiguous instruction requires clarification",
+                )
+                self.task_orchestrator.transition_task(
+                    orchestrated_task.task_id,
+                    TaskLifecycleState.WAITING_FOR_USER,
+                    reason="Awaiting user clarification on ambiguous scope",
+                )
+                plan = Plan(goal=resolved_goal, session_id=active_session)
+                return ExecutionOutcome(
+                    status="waiting_for_clarification",
+                    plan=plan,
+                    final_response=reasoning_res["clarification_prompt"],
+                    steps_executed=0,
+                )
+        except Exception as reason_err:
+            logger.debug(f"Deep reasoning pipeline note: {reason_err}")
 
         # Permanent Personal Identity & Memory Fast-Path (Store, Query, Forget)
         try:

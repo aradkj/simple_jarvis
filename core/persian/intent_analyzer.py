@@ -10,8 +10,13 @@ Classifies user requests into strongly-typed intent categories, distinguishing:
 from __future__ import annotations
 
 import re
+from typing import Any
 
-from core.persian.models import PersianIntentType
+from core.persian.models import (
+    PersianEntity,
+    PersianIntentType,
+    SemanticInterpretation,
+)
 
 
 class PersianIntentAnalyzer:
@@ -24,7 +29,7 @@ class PersianIntentAnalyzer:
             re.IGNORECASE,
         ),
         re.compile(
-            r"\b(?:هر\s*چی\s*اضافی[‌\s]*ه|همه\s*چیز\s*(?:رو|را)\s*(?:پاک|حذف|دیلیت)\s*کن|همه‌چیز\s*(?:رو|را)\s*(?:پاک|حذف|دیلیت)\s*کن|پاکسازی\s*کامل|کل\s*اطلاعات\s*(?:رو|را)\s*حذف\s*کن|تمام\s*فایل[‌\s]*ها\s*(?:رو|را)\s*دیلیت\s*کن|کل\s+سیستم\s*(?:رو|را)?\s*تمیز\s*کن)\b",
+            r"\b(?:هر\s*چی\s*اضافی[‌\s]*(?:ه|هست)|همه\s*چیز\s*(?:رو|را)\s*(?:پاک|حذف|دیلیت)\s*کن|همه‌چیز\s*(?:رو|را)\s*(?:پاک|حذف|دیلیت)\s*کن|پاکسازی\s*کامل|کل\s*اطلاعات\s*(?:رو|را)\s*حذف\s*کن|تمام\s*فایل[‌\s]*ها\s*(?:رو|را)\s*دیلیت\s*کن|کل\s+سیستم\s*(?:رو|را)?\s*تمیز\s*کن)\b",
             re.IGNORECASE,
         ),
         re.compile(
@@ -134,7 +139,7 @@ class PersianIntentAnalyzer:
     # 9. Application and window control
     APP_CONTROL_PATTERNS = [
         re.compile(
-            r"\b(?:ماشین\s*حساب|ماشین‌حساب|calculator|نوت‌پد|نوتپد|notepad|کروم|chrome|اج|ایج|edge|ترمینال|terminal|cmd|powershell)\b",
+            r"\b(?:ماشین\s*حساب|ماشین‌حساب|calculator|نوت‌پد|نوتپد|notepad|کروم|chrome|اج|ایج|edge|ترمینال|terminal|cmd|powershell|داکر|docker|کانتینر|container|سرور|server|سرویس|service)\b",
             re.IGNORECASE,
         ),
     ]
@@ -166,7 +171,15 @@ class PersianIntentAnalyzer:
     # 13. Multi-step task planning
     TASK_PLANNING_PATTERNS = [
         re.compile(
-            r"\b(?:اول\s+.+?\s+بعد|ابتدا\s+.+?\s+سپس|برنامه‌ریزی\s*کن|نقشه\s*راه|مراحل\s*کار|plan\s+out)\b",
+            r"\b(?:اول\s+.+?\s+بعد|ابتدا\s+.+?\s+سپس|برنامه‌ریزی\s*کن|نقشه\s*راه|مراحل\s*کار|plan\s+out|زمان[‌\s]*بندی\s*کن)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:باز\s*کن|بررسی\s*کن|استارت\s*بزن|متوقف\s*کن).+?(?:تست[‌\s]*هاش|تستاش|لاگ[‌\s]*ها|سپس|بعد|و\s+اگه).+?(?:اجرا\s*کن|درستش\s*کن|حلش\s*کن|ریستارت\s*کن|نمایش\s*بده|چک\s*کن)\b",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:تست[‌\s]*ها\s*رو\s*ران\s*کن\s*و\s*وضعیت|داکر\s*رو\s*استارت\s*بزن\s*و\s*کانتینر|تسک[‌\s]*ها\s*رو\s*زمان|سرور\s*رو\s*متوقف\s*کن\s*سپس)\b",
             re.IGNORECASE,
         ),
     ]
@@ -301,6 +314,8 @@ class PersianIntentAnalyzer:
                 "پاک",
                 "حذف",
                 "بخوان",
+                "بخون",
+                "بخونش",
                 "مشاهده",
                 "باز کن",
                 "ادیت",
@@ -334,3 +349,241 @@ class PersianIntentAnalyzer:
         intent, is_hypo, is_ambig, clarify_prompt = self.analyze(text)
         conf = 0.95 if intent != PersianIntentType.UNKNOWN else 0.3
         return intent, conf, is_ambig, is_hypo, clarify_prompt
+
+    def extract_secondary_intents(
+        self, text: str, primary: PersianIntentType
+    ) -> list[PersianIntentType]:
+        """Extract multi-intent secondary objectives from complex requests (Section 4)."""
+        secondaries: list[PersianIntentType] = []
+        lower = text.lower()
+
+        # Check diagnostics
+        for pat in self.DIAGNOSTICS_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.SYSTEM_DIAGNOSTICS:
+                secondaries.append(PersianIntentType.SYSTEM_DIAGNOSTICS)
+                break
+        # Check git
+        for pat in self.GIT_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.GIT_OPERATION:
+                secondaries.append(PersianIntentType.GIT_OPERATION)
+                break
+        # Check debugging
+        for pat in self.DEBUGGING_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.DEBUGGING:
+                secondaries.append(PersianIntentType.DEBUGGING)
+                break
+        # Check explanation
+        for pat in self.EXPLANATION_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.CODE_EXPLANATION:
+                secondaries.append(PersianIntentType.CODE_EXPLANATION)
+                break
+        # Check file operations
+        if (
+            any(k in lower for k in ("فایل", "file", "پوشه", "folder"))
+            and primary != PersianIntentType.FILE_OPERATION
+        ):
+            secondaries.append(PersianIntentType.FILE_OPERATION)
+        # Check app control
+        for pat in self.APP_CONTROL_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.APPLICATION_CONTROL:
+                secondaries.append(PersianIntentType.APPLICATION_CONTROL)
+                break
+        # Check web research
+        for pat in self.WEB_RESEARCH_PATTERNS:
+            if pat.search(lower) and primary != PersianIntentType.WEB_RESEARCH:
+                secondaries.append(PersianIntentType.WEB_RESEARCH)
+                break
+        return list(dict.fromkeys(secondaries))
+
+    def extract_constraints(self, text: str) -> tuple[list[str], list[str]]:
+        """Extract operational constraints and prohibited actions from instructions (Section 3.5 & 4)."""
+        constraints: list[str] = []
+        prohibitions: list[str] = []
+        lower = text.lower()
+
+        # Data preservation
+        if any(
+            k in lower
+            for k in (
+                "حواست باشه چیزی از بین نره",
+                "دقت کن چیزی پاک نشه",
+                "اطلاعات پاک نشه",
+                "دیتابیس پاک نشه",
+                "اطلاعات قبلی حذف نشود",
+                "حذف نشود",
+                "پاک نشه",
+                "حفظ کن",
+                "حفظش کن",
+                "بدون اجازه",
+                "حذف نکن",
+                "preserve data",
+                "do not lose data",
+            )
+        ):
+            constraints.append("preserve_existing_data")
+            prohibitions.append("no_unauthorized_deletion")
+
+        # Read only constraint
+        if any(
+            k in lower
+            for k in (
+                "فقط ببین",
+                "فقط بررسی کن",
+                "فقط بخوان",
+                "فقط نگاه کن",
+                "دست نزن",
+                "دست به",
+                "دست به هیچی نزن",
+                "تغییر نده",
+                "ویرایش نکن",
+                "ادیت نکن",
+                "تغییری",
+                "read only",
+                "do not modify",
+                "inspect only",
+            )
+        ):
+            constraints.append("read_only")
+            prohibitions.append("no_modifications")
+
+        # Non-destructive
+        if any(
+            k in lower for k in ("خرابش نکن", "دیگه خراب نشه", "نبندش", "پاکش نکن", "do not break")
+        ):
+            constraints.append("maintain_stability")
+
+        # Specific prohibited targets
+        m1 = re.findall(r"دست\s*به\s+(.+?)\s*نزن", lower)
+        m2 = re.findall(r"(?:به\s+)(.+?)\s*(?:دست\s*نزن|تغییر\s*نده|پاک\s*نکن)", lower)
+        for target in m1 + m2:
+            target_clean = target.strip()
+            if target_clean and target_clean not in ("هیچی", "چیزی"):
+                prohibitions.append(f"do_not_touch_{target_clean}")
+
+        return constraints, prohibitions
+
+    def detect_ambiguities(
+        self,
+        text: str,
+        primary: PersianIntentType,
+        entities: list[PersianEntity] | None = None,
+        context: Any = None,
+    ) -> list[str]:
+        """Detect ambiguous or underspecified requests before execution (Section 3.5)."""
+        ambiguities: list[str] = []
+        lower = text.lower()
+
+        # Destructive broad scope
+        for pat in self.AMBIGUOUS_DESTRUCTIVE_PATTERNS:
+            if pat.search(lower):
+                ambiguities.append("broad_destructive_scope_unspecified_targets")
+
+        # Unclear relative reference without context
+        if (
+            any(k in lower for k in ("اون فایل", "فایل قبلی", "اون یکی"))
+            and not context
+            and (
+                not entities
+                or not any(e.entity_type in ("file", "file_name", "file_path") for e in entities)
+            )
+        ):
+            ambiguities.append("unclear_file_reference")
+
+        # Unspecified target
+        if "بدون مشخص کردن" in lower or "بدون نام" in lower:
+            ambiguities.append("unspecified_target_parameter")
+
+        # Conflicting instructions
+        if ("پاک کن" in lower or "حذف کن" in lower) and (
+            "دست نزن" in lower or "تغییر نده" in lower
+        ):
+            ambiguities.append("conflicting_instruction_delete_vs_do_not_touch")
+
+        return ambiguities
+
+    def interpret(
+        self,
+        text: str,
+        entities: list[PersianEntity] | None = None,
+        context: Any = None,
+        normalized_text: str | None = None,
+    ) -> SemanticInterpretation:
+        """Full Semantic Interpretation Layer implementation satisfying Section 4 requirements."""
+        norm_text = normalized_text or text
+        primary, conf, is_ambig, is_hypo, clarification_prompt = self.analyze_intent(norm_text)
+        secondaries = self.extract_secondary_intents(norm_text, primary)
+        constraints, prohibitions = self.extract_constraints(norm_text)
+        ambiguities = self.detect_ambiguities(norm_text, primary, entities, context)
+        if is_ambig and "broad_destructive_scope_unspecified_targets" not in ambiguities:
+            ambiguities.append("broad_scope_requires_clarification")
+
+        is_read_only = "read_only" in constraints or any(
+            k in norm_text.lower() for k in ("فقط ببین", "بررسی کن", "inspect only")
+        )
+        requires_clarify = len(ambiguities) > 0 or is_ambig
+
+        action = "conversation"
+        if primary == PersianIntentType.FILE_OPERATION:
+            action = "file_operation"
+        elif primary == PersianIntentType.APPLICATION_CONTROL:
+            action = "application_control"
+        elif primary == PersianIntentType.GIT_OPERATION:
+            action = "git_operation"
+        elif primary == PersianIntentType.DEBUGGING:
+            action = "diagnose_and_debug"
+        elif primary == PersianIntentType.SYSTEM_DIAGNOSTICS:
+            action = "system_diagnostics"
+        elif primary == PersianIntentType.WEB_RESEARCH:
+            action = "web_search"
+        elif primary == PersianIntentType.TASK_PLANNING:
+            action = "multi_step_plan"
+
+        risks: list[str] = []
+        if any(k in norm_text.lower() for k in ("پاک", "حذف", "delete", "remove", "drop", "wipe")):
+            risks.append("destructive_file_or_data_loss")
+        if primary == PersianIntentType.APPLICATION_CONTROL:
+            risks.append("process_termination_or_launch")
+
+        return SemanticInterpretation(
+            raw_input=text,
+            normalized_text=norm_text,
+            detected_language="fa" if any("\u0600" <= c <= "\u06ff" for c in text) else "en",
+            primary_intent=primary,
+            secondary_intents=secondaries,
+            requested_action=action,
+            target_entity=entities[0].name if entities else None,
+            relevant_objects=[
+                e.name for e in (entities or []) if e.entity_type in ("file", "app", "project")
+            ],
+            relevant_locations=[
+                e.name for e in (entities or []) if e.entity_type in ("directory", "file_path")
+            ],
+            constraints=constraints,
+            preconditions=[],
+            desired_outcome="execute requested action safely"
+            if not is_hypo
+            else "provide hypothetical analysis",
+            temporal_references=re.findall(
+                r"\b(امروز|دیروز|الان|قبلاً|قبلا|بعداً|بعدا|today|yesterday|now)\b",
+                norm_text,
+                re.IGNORECASE,
+            ),
+            dependencies=[],
+            explicit_user_preferences=[],
+            potential_risks=risks,
+            ambiguities=ambiguities,
+            confidence_indicators={
+                "intent": conf,
+                "semantic_calibration": 0.95 if not ambiguities else 0.4,
+            },
+            requires_clarification=requires_clarify,
+            clarification_prompt=clarification_prompt,
+            is_hypothetical=is_hypo,
+            is_read_only=is_read_only,
+            extracted_entities=entities or [],
+            resolved_references={},
+            unresolved_references=[],
+            active_project=None,
+            active_file=None,
+            response_language="en",
+        )

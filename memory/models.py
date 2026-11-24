@@ -12,12 +12,33 @@ from typing import Any
 
 
 class MemoryCategory(StrEnum):
-    """Categorical classification of persistent memories."""
+    """Categorical classification of persistent memories (Section 6.1)."""
 
     USER_PROFILE = "user_profile"  # Long-term user facts (languages, tech preferences)
     PREFERENCE = "preference"  # Interaction & workflow preferences (formatting, styles)
     PROJECT = "project"  # Persistent context bound to a specific project
     EPISODIC = "episodic"  # Resolved events, architectural decisions, task outcomes
+    USER_FACT = "user_fact"  # Stable user facts
+    PROJECT_ARCHITECTURE = "project_architecture"  # Architectural designs and components
+    TECHNICAL_DECISION = "technical_decision"  # Technical and design decisions
+    CONSTRAINT = "constraint"  # Critical boundaries and constraints
+    RECURRING_WORKFLOW = "recurring_workflow"  # Frequent user workflows
+    GOAL = "goal"  # Long-term objectives
+    EXPLICIT_MEMORY = "explicit_memory"  # Explicitly instructed memories ("remember that...")
+    SESSION_FACT = "session_fact"  # Temporary session facts
+    EXECUTION_OUTCOME = "execution_outcome"  # Historical tool execution outcomes
+
+
+@dataclass
+class MemoryProvenance:
+    """Provenance and origin tracking for memory records (Section 6.2)."""
+
+    source_conversation_id: str
+    source_message_id: str | None = None
+    created_at: str = ""
+    verification_status: str = "user_confirmed"  # user_confirmed, inferred, temporary_assumption, agent_summary, verified_result
+    confidence: float = 1.0
+    turn_index: int = 0
 
 
 class MemoryStatus(StrEnum):
@@ -52,6 +73,8 @@ class MemoryRecord:
     status: MemoryStatus = MemoryStatus.PENDING_APPROVAL
     user_approved: bool = False
     content_fingerprint: str = ""
+    verification_status: str = "user_confirmed"  # user_confirmed, inferred, temporary_assumption, agent_summary, verified_result
+    vector: list[float] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -85,6 +108,7 @@ class MemoryRecord:
             "status": self.status.value,
             "user_approved": self.user_approved,
             "content_fingerprint": self.content_fingerprint,
+            "verification_status": self.verification_status,
             "metadata": self.metadata,
         }
 
@@ -103,6 +127,11 @@ class MemoryRecord:
 
         expires_val = row_dict.get("expires_at")
         expires_dt = datetime.fromisoformat(expires_val) if expires_val else None
+        verif_status = str(
+            row_dict.get("verification_status")
+            or meta.get("verification_status")
+            or "user_confirmed"
+        )
 
         return cls(
             id=str(row_dict["id"]),
@@ -122,5 +151,6 @@ class MemoryRecord:
             status=MemoryStatus(row_dict.get("status", MemoryStatus.ACTIVE.value)),
             user_approved=bool(row_dict.get("user_approved", 0)),
             content_fingerprint=str(row_dict.get("content_fingerprint") or ""),
+            verification_status=verif_status,
             metadata=meta,
         )

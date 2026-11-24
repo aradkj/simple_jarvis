@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from infrastructure.logging import get_logger
 from memory.models import MemoryRecord, MemoryStatus
@@ -19,9 +20,11 @@ class MemoryLifecycleManager:
         self,
         repository: MemoryRepository,
         privacy_manager: MemoryPrivacyManager | None = None,
+        embedding_provider: Any | None = None,
     ) -> None:
         self.repository = repository
         self.privacy_manager = privacy_manager or MemoryPrivacyManager()
+        self.embedding_provider = embedding_provider
 
     def approve_candidate(self, candidate_id: str) -> MemoryRecord | None:
         """Promote a pending memory candidate to active status with conflict resolution."""
@@ -47,8 +50,49 @@ class MemoryLifecycleManager:
         rec.user_approved = True
         rec.updated_at = now
         rec.last_accessed_at = now
+        if self.embedding_provider and getattr(self.embedding_provider, "is_available", False):
+            try:
+                rec.vector = self.embedding_provider.embed_text(rec.content)
+                rec.metadata["embedding_provider"] = self.embedding_provider.provider_name
+                rec.metadata["embedding_model"] = self.embedding_provider.model_name
+            except Exception as exc:
+                logger.debug(f"Candidate embedding vector calculation note: {exc}")
         self.repository.save(rec)
         return rec
+
+    def consolidate_memories(self, project_id: str | None = None) -> dict[str, Any]:
+        """Consolidate project memories: merge duplicates and resolve conflicts."""
+        all_records = self.repository.list_records(
+            project_id=project_id,
+            status=MemoryStatus.ACTIVE,
+            limit=200,
+        )
+        duplicates_removed = 0
+        seen_fingerprints: dict[str, MemoryRecord] = {}
+
+        for rec in all_records:
+            fp = rec.content_fingerprint
+            if fp in seen_fingerprints:
+                existing = seen_fingerprints[fp]
+                if existing.user_approved and not rec.user_approved:
+                    self.repository.delete(rec.id, soft=True)
+                    duplicates_removed += 1
+                elif rec.user_approved and not existing.user_approved:
+                    self.repository.delete(existing.id, soft=True)
+                    seen_fingerprints[fp] = rec
+                    duplicates_removed += 1
+                else:
+                    self.repository.delete(rec.id, soft=True)
+                    duplicates_removed += 1
+            else:
+                seen_fingerprints[fp] = rec
+
+        return {
+            "project_id": project_id,
+            "total_processed": len(all_records),
+            "duplicates_merged": duplicates_removed,
+            "remaining_active": len(seen_fingerprints),
+        }
 
     def reject_candidate(self, candidate_id: str) -> bool:
         """Reject and delete a pending memory candidate."""

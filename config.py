@@ -315,8 +315,34 @@ class Settings(BaseSettings):
         description="Retention duration in days for episodic memories",
     )
     memory_embedding_enabled: bool = Field(
-        default=False,
-        description="Enable optional embedding provider for semantic search (disabled by default)",
+        default=True,
+        description="Enable optional embedding provider for semantic search",
+    )
+    memory_embedding_provider: str = Field(
+        default="local",
+        description="Active embedding provider for semantic memory: 'local', 'gemini', 'openai', 'noop'",
+    )
+    memory_semantic_search_threshold: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity threshold for vector semantic retrieval",
+    )
+
+    # Phase B Deep Reasoning & Autonomy Controls (Section 7, 8, 13)
+    reasoning_mode: str = Field(
+        default="adaptive",
+        description="Reasoning engine depth: 'lightweight' (fast heuristic), 'adaptive' (complexity-based), 'deep' (full analytical)",
+    )
+    reasoning_max_alternatives: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum candidate solutions evaluated in multi-step problem solving",
+    )
+    persian_understanding_enabled: bool = Field(
+        default=True,
+        description="Enable advanced Persian normalization, colloquial parsing, and ambiguity detection",
     )
 
     # Phase 6 Windows Desktop Control & Native System Actions

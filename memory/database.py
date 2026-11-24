@@ -110,6 +110,19 @@ class SQLiteMemoryStore(BaseMemoryStore):
                         ON memories(content_fingerprint);
                     CREATE INDEX IF NOT EXISTS idx_memories_status_appr
                         ON memories(status, user_approved);
+
+                    -- Phase B Persistent Vector Storage
+                    CREATE TABLE IF NOT EXISTS memory_vectors (
+                        memory_id TEXT PRIMARY KEY,
+                        vector_blob BLOB NOT NULL,
+                        dimension INTEGER NOT NULL,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_memory_vectors_provider
+                        ON memory_vectors(provider, model);
                     """
                 )
 

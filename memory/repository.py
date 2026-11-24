@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import struct
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 from infrastructure.logging import get_logger
 from infrastructure.paths import get_data_dir
+from memory.embeddings import cosine_similarity
 from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
 
 logger = get_logger("memory.repository")
@@ -85,8 +87,32 @@ class MemoryRepository:
                         ON memories(content_fingerprint);
                     CREATE INDEX IF NOT EXISTS idx_memories_status_appr
                         ON memories(status, user_approved);
+
+                    -- Persistent Vector Storage for Semantic Embeddings (Section 6.3)
+                    CREATE TABLE IF NOT EXISTS memory_vectors (
+                        memory_id TEXT PRIMARY KEY,
+                        vector_blob BLOB NOT NULL,
+                        dimension INTEGER NOT NULL,
+                        provider TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_memory_vectors_provider
+                        ON memory_vectors(provider, model);
                     """
                 )
+
+                # Safe idempotent schema migration for memories table
+                try:
+                    cur = conn.execute("PRAGMA table_info(memories);")
+                    cols = [c["name"] for c in cur.fetchall()]
+                    if "verification_status" not in cols:
+                        conn.execute(
+                            "ALTER TABLE memories ADD COLUMN verification_status TEXT DEFAULT 'user_confirmed';"
+                        )
+                except Exception as exc:
+                    logger.debug(f"Column migration check note: {exc}")
 
                 # Initialize FTS5 if supported
                 try:
@@ -126,9 +152,9 @@ class MemoryRepository:
                         id, category, key, content, normalized_content, project_id,
                         source_conversation_id, source_message_id, created_at, updated_at,
                         last_accessed_at, expires_at, importance, confidence, status,
-                        user_approved, content_fingerprint, metadata
+                        user_approved, content_fingerprint, metadata, verification_status
                     ) VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     ON CONFLICT(id) DO UPDATE SET
                         category = excluded.category,
@@ -146,7 +172,8 @@ class MemoryRepository:
                         status = excluded.status,
                         user_approved = excluded.user_approved,
                         content_fingerprint = excluded.content_fingerprint,
-                        metadata = excluded.metadata;
+                        metadata = excluded.metadata,
+                        verification_status = excluded.verification_status;
                     """,
                     (
                         record.id,
@@ -167,8 +194,28 @@ class MemoryRepository:
                         1 if record.user_approved else 0,
                         record.content_fingerprint,
                         json.dumps(record.metadata),
+                        getattr(record, "verification_status", "user_confirmed"),
                     ),
                 )
+
+                if record.vector:
+                    dim = len(record.vector)
+                    blob = struct.pack(f"{dim}f", *record.vector)
+                    prov = record.metadata.get("embedding_provider", "local_semantic")
+                    mod = record.metadata.get("embedding_model", "deterministic-hash-128d")
+                    now_iso = datetime.now(UTC).isoformat()
+                    conn.execute(
+                        """
+                        INSERT INTO memory_vectors (memory_id, vector_blob, dimension, provider, model, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(memory_id) DO UPDATE SET
+                            vector_blob = excluded.vector_blob,
+                            dimension = excluded.dimension,
+                            provider = excluded.provider,
+                            model = excluded.model;
+                        """,
+                        (record.id, blob, dim, prov, mod, now_iso),
+                    )
 
                 if self._fts5_available:
                     # Sync FTS table
@@ -188,6 +235,14 @@ class MemoryRepository:
                             ),
                         )
         return record.id
+
+    def save_memory(self, record: MemoryRecord) -> str:
+        """Alias for save."""
+        return self.save(record)
+
+    def get_project_memories(self, project_id: str) -> list[MemoryRecord]:
+        """Convenience method to retrieve active memories for a project."""
+        return self.list_records(project_id=project_id)
 
     def get(self, memory_id: str) -> MemoryRecord | None:
         """Retrieve a memory record by ID."""
@@ -363,6 +418,95 @@ class MemoryRepository:
                     if self._fts5_available:
                         conn.execute("DELETE FROM memories_fts;")
                 return cur.rowcount
+
+    def save_vector(
+        self,
+        memory_id: str,
+        vector: list[float],
+        provider: str = "local_semantic",
+        model: str = "deterministic-hash-128d",
+    ) -> None:
+        """Store or update vector embedding for a memory record."""
+        if not vector:
+            return
+        dim = len(vector)
+        blob = struct.pack(f"{dim}f", *vector)
+        now_iso = datetime.now(UTC).isoformat()
+        with self._lock:
+            conn = self._get_connection()
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO memory_vectors (memory_id, vector_blob, dimension, provider, model, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(memory_id) DO UPDATE SET
+                        vector_blob = excluded.vector_blob,
+                        dimension = excluded.dimension,
+                        provider = excluded.provider,
+                        model = excluded.model;
+                    """,
+                    (memory_id, blob, dim, provider, model, now_iso),
+                )
+
+    def get_vector(self, memory_id: str) -> list[float] | None:
+        """Retrieve stored vector for memory ID."""
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.execute(
+                "SELECT vector_blob, dimension FROM memory_vectors WHERE memory_id = ?;",
+                (memory_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        blob = row["vector_blob"]
+        dim = row["dimension"]
+        return list(struct.unpack(f"{dim}f", blob))
+
+    def delete_vector(self, memory_id: str) -> bool:
+        """Delete stored vector for a memory record."""
+        with self._lock:
+            conn = self._get_connection()
+            with conn:
+                cur = conn.execute("DELETE FROM memory_vectors WHERE memory_id = ?;", (memory_id,))
+                return cur.rowcount > 0
+
+    def search_vectors(
+        self,
+        query_vector: list[float],
+        limit: int = 30,
+        min_similarity: float = 0.15,
+    ) -> list[tuple[str, float]]:
+        """Compute cosine similarities across stored vectors and return ranked (memory_id, score) pairs."""
+        if not query_vector:
+            return []
+        q_dim = len(query_vector)
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.execute("SELECT memory_id, vector_blob, dimension FROM memory_vectors;")
+            rows = cur.fetchall()
+
+        scores: list[tuple[str, float]] = []
+        for r in rows:
+            dim = r["dimension"]
+            if dim != q_dim:
+                continue
+            blob = r["vector_blob"]
+            vec = list(struct.unpack(f"{dim}f", blob))
+            sim = cosine_similarity(query_vector, vec)
+            if sim >= min_similarity:
+                scores.append((r["memory_id"], sim))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:limit]
+
+    def get_vector_count(self) -> int:
+        """Return total number of stored memory vectors."""
+        with self._lock:
+            conn = self._get_connection()
+            cur = conn.execute("SELECT COUNT(*) as cnt FROM memory_vectors;")
+            row = cur.fetchone()
+            return int(row["cnt"]) if row else 0
 
     def close(self) -> None:
         """Close connection if locally managed."""

@@ -15,11 +15,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -229,6 +231,9 @@ class PersonalityMemoryDialog(QDialog):
         self.tabs.addTab(self._build_preferences_tab(), "⚙️ Preferences")
         self.tabs.addTab(self._build_facts_tab(), "📌 Known Facts")
         self.tabs.addTab(self._build_personality_tab(), "🎭 Personality & Tone")
+        self.tabs.addTab(
+            self._build_intelligence_settings_tab(), "🧠 Intelligence & Memory Settings"
+        )
         self.tabs.addTab(self._build_backup_tab(), "💾 Backup & Manage")
 
         main_layout.addWidget(self.tabs, 1)
@@ -661,6 +666,182 @@ class PersonalityMemoryDialog(QDialog):
         layout.addStretch()
 
         return widget
+
+    def _build_intelligence_settings_tab(self) -> QWidget:
+        """Construct Phase B Intelligence & Memory Diagnostics Tab (Section 13)."""
+        from config import get_settings
+
+        settings = get_settings()
+
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setSpacing(14)
+
+        # 1. Persian Understanding & Language Policy
+        lang_group = QGroupBox("🗣️ Persian Understanding & Language Policy")
+        lang_group.setStyleSheet("QGroupBox { font-weight: bold; color: #58a6ff; }")
+        lang_form = QFormLayout(lang_group)
+
+        self._intel_persian_cb = QCheckBox(
+            "Enable Persian Normalization & Colloquial Understanding"
+        )
+        self._intel_persian_cb.setChecked(getattr(settings, "persian_understanding_enabled", True))
+        lang_form.addRow("Persian Understanding:", self._intel_persian_cb)
+
+        self._intel_lang_combo = QComboBox()
+        self._intel_lang_combo.addItems(
+            [
+                "DEFAULT_ENGLISH (British English Assistant Default)",
+                "FOLLOW_USER (Match User Input Language)",
+                "PERSIAN (Always Persian Output)",
+            ]
+        )
+        curr_policy = getattr(settings, "response_language_policy", "DEFAULT_ENGLISH")
+        for i in range(self._intel_lang_combo.count()):
+            if curr_policy in self._intel_lang_combo.itemText(i):
+                self._intel_lang_combo.setCurrentIndex(i)
+                break
+        lang_form.addRow("Response Language Policy:", self._intel_lang_combo)
+        layout.addWidget(lang_group)
+
+        # 2. Reasoning & Autonomy Mode
+        reason_group = QGroupBox("🧠 Deep Reasoning & Bounded Autonomy")
+        reason_group.setStyleSheet("QGroupBox { font-weight: bold; color: #58a6ff; }")
+        reason_form = QFormLayout(reason_group)
+
+        self._intel_reasoning_mode = QComboBox()
+        self._intel_reasoning_mode.addItems(
+            [
+                "adaptive (Complexity-Based Dynamic Routing)",
+                "deep (Full Multi-Step & Trade-Off Evaluation)",
+                "lightweight (Fast Heuristic Reasoning)",
+            ]
+        )
+        curr_mode = getattr(settings, "reasoning_mode", "adaptive")
+        for i in range(self._intel_reasoning_mode.count()):
+            if curr_mode in self._intel_reasoning_mode.itemText(i):
+                self._intel_reasoning_mode.setCurrentIndex(i)
+                break
+        reason_form.addRow("Reasoning Mode:", self._intel_reasoning_mode)
+
+        self._intel_safety_status = QLabel(
+            "Active (Confirmation required for destructive operations)"
+        )
+        self._intel_safety_status.setStyleSheet("color: #3fb950; font-weight: bold;")
+        reason_form.addRow("Bounded Autonomy:", self._intel_safety_status)
+        layout.addWidget(reason_group)
+
+        # 3. Semantic Memory & Embedding Diagnostics
+        diag_group = QGroupBox("🔍 Semantic Memory & Vector Diagnostics")
+        diag_group.setStyleSheet("QGroupBox { font-weight: bold; color: #58a6ff; }")
+        diag_form = QFormLayout(diag_group)
+
+        self._diag_status_label = QLabel("Checking...")
+        diag_form.addRow("Retrieval Architecture Status:", self._diag_status_label)
+
+        self._diag_provider_label = QLabel("Checking...")
+        diag_form.addRow("Active Embedding Provider:", self._diag_provider_label)
+
+        self._diag_model_label = QLabel("Checking...")
+        diag_form.addRow("Vector Model & Dimension:", self._diag_model_label)
+
+        self._diag_vectors_label = QLabel("Checking...")
+        diag_form.addRow("Indexed Vector Count:", self._diag_vectors_label)
+        layout.addWidget(diag_group)
+
+        # 4. Action Buttons
+        btn_box = QHBoxLayout()
+        refresh_diag_btn = QPushButton("🔄 Refresh Diagnostics")
+        refresh_diag_btn.clicked.connect(self._refresh_intelligence_diagnostics)
+
+        consolidate_btn = QPushButton("🧹 Consolidate Memories")
+        consolidate_btn.clicked.connect(self._run_memory_consolidation)
+
+        save_intel_btn = QPushButton("💾 Save Intelligence Settings")
+        save_intel_btn.setStyleSheet("background-color: #238636; color: white; font-weight: bold;")
+        save_intel_btn.clicked.connect(self._save_intelligence_settings)
+
+        btn_box.addWidget(refresh_diag_btn)
+        btn_box.addWidget(consolidate_btn)
+        btn_box.addStretch()
+        btn_box.addWidget(save_intel_btn)
+        layout.addLayout(btn_box)
+
+        layout.addStretch()
+
+        self._refresh_intelligence_diagnostics()
+        return widget
+
+    def _refresh_intelligence_diagnostics(self) -> None:
+        """Query MemoryManager and update live diagnostic labels."""
+        try:
+            from memory.manager import MemoryManager
+
+            mm = MemoryManager()
+            mm.initialize()
+            status = mm.get_status()
+            retrieval = status.get("retrieval", {})
+
+            ret_status = retrieval.get("status", "unknown")
+            if ret_status == "operational":
+                self._diag_status_label.setText(
+                    "OPERATIONAL (Semantic Vector Search + FTS5 Active)"
+                )
+                self._diag_status_label.setStyleSheet("color: #3fb950; font-weight: bold;")
+            elif ret_status == "fallback_fts5_only":
+                self._diag_status_label.setText(
+                    "FALLBACK FTS5 ONLY (Semantic Vector Search Inactive)"
+                )
+                self._diag_status_label.setStyleSheet("color: #d29922; font-weight: bold;")
+            elif ret_status == "degraded":
+                self._diag_status_label.setText("DEGRADED (Full-Text Index Unavailable)")
+                self._diag_status_label.setStyleSheet("color: #f85149; font-weight: bold;")
+            else:
+                self._diag_status_label.setText("DISABLED")
+                self._diag_status_label.setStyleSheet("color: #8b949e; font-weight: bold;")
+
+            self._diag_provider_label.setText(str(status.get("embedding_provider", "noop")))
+            self._diag_model_label.setText(
+                f"{status.get('embedding_model', 'none')} ({status.get('embedding_dimension', 0)} dimensions)"
+            )
+            self._diag_vectors_label.setText(str(retrieval.get("indexed_vectors", 0)))
+        except Exception as exc:
+            self._diag_status_label.setText(f"Error checking: {exc}")
+
+    def _run_memory_consolidation(self) -> None:
+        """Run controlled memory consolidation across stores."""
+        try:
+            from memory.manager import MemoryManager
+
+            mm = MemoryManager()
+            mm.initialize()
+            res = mm.consolidate_memories()
+            self._refresh_intelligence_diagnostics()
+            QMessageBox.information(
+                self,
+                "Consolidation Complete",
+                f"Memory consolidation successfully executed:\n"
+                f"- Active Memories: {res.get('active_memories')}\n"
+                f"- Duplicates Merged: {res.get('duplicates_merged')}\n"
+                f"- Conflicts Superseded: {res.get('conflicts_superseded')}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Consolidation Error", f"Consolidation failed: {exc}")
+
+    def _save_intelligence_settings(self) -> None:
+        """Save settings updates."""
+        try:
+            from config import get_settings
+
+            s = get_settings()
+            s.persian_understanding_enabled = self._intel_persian_cb.isChecked()
+            sel_text = self._intel_lang_combo.currentText().split()[0]
+            s.response_language_policy = sel_text
+            sel_mode = self._intel_reasoning_mode.currentText().split()[0]
+            s.reasoning_mode = sel_mode
+            QMessageBox.information(self, "Saved", "Intelligence settings updated successfully.")
+        except Exception as exc:
+            QMessageBox.critical(self, "Error", f"Failed to save settings: {exc}")
 
     def _export_json(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

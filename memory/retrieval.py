@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING, Any
 
 from infrastructure.logging import get_logger
 from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
 from memory.privacy import MemoryPrivacyManager
 from memory.ranking import MemoryRanker, ScoredMemory
 from memory.repository import MemoryRepository
+
+if TYPE_CHECKING:
+    from memory.embeddings import BaseEmbeddingProvider
 
 logger = get_logger("memory.retrieval")
 
@@ -21,10 +25,12 @@ class MemoryRetriever:
         repository: MemoryRepository,
         ranker: MemoryRanker | None = None,
         privacy_manager: MemoryPrivacyManager | None = None,
+        embedding_provider: BaseEmbeddingProvider | None = None,
     ) -> None:
         self.repository = repository
         self.ranker = ranker or MemoryRanker()
         self.privacy_manager = privacy_manager or MemoryPrivacyManager()
+        self.embedding_provider = embedding_provider
 
     def _sanitize_fts_query(self, query: str) -> str:
         """Sanitize query string into safe alphanumeric tokens for SQLite FTS5."""
@@ -49,6 +55,20 @@ class MemoryRetriever:
 
         results_map: dict[str, MemoryRecord] = {}
 
+        # 0. Semantic Vector Retrieval (Section 6.3)
+        if self.embedding_provider and self.embedding_provider.is_available and query.strip():
+            try:
+                q_vec = self.embedding_provider.embed_text(query)
+                if q_vec:
+                    matches = self.repository.search_vectors(q_vec, limit=30, min_similarity=0.15)
+                    for mem_id, sim in matches:
+                        rec = self.repository.get(mem_id)
+                        if rec and rec.status == MemoryStatus.ACTIVE and rec.user_approved:
+                            rec.metadata["vector_similarity"] = sim
+                            results_map[rec.id] = rec
+            except Exception as exc:
+                logger.debug(f"Vector search exception note: {exc}")
+
         # Attempt FTS5 retrieval if available and query is present
         sanitized_fts = self._sanitize_fts_query(query) if query.strip() else ""
         if self.repository.is_fts5_available and sanitized_fts:
@@ -70,7 +90,8 @@ class MemoryRetriever:
                     )
                     for r in cur.fetchall():
                         rec = MemoryRecord.from_row(r)
-                        results_map[rec.id] = rec
+                        if rec.id not in results_map:
+                            results_map[rec.id] = rec
             except Exception as exc:
                 logger.debug(f"FTS5 candidate search fell back to SQL: {exc}")
 
@@ -82,7 +103,8 @@ class MemoryRetriever:
             limit=50,
         )
         for r in sql_records:
-            results_map[r.id] = r
+            if r.id not in results_map:
+                results_map[r.id] = r
 
         # 3. Filter by project scope:
         # Include if record has NO project_id OR matches the current project_id.
@@ -129,3 +151,27 @@ class MemoryRetriever:
             self.repository.record_access([sm.record.id for sm in ranked])
 
         return ranked
+
+    def get_retrieval_status(self) -> dict[str, Any]:
+        """Report honest status of memory retrieval subsystem (Section 6.3 & 13)."""
+        fts5_ok = self.repository.is_fts5_available
+        emb_avail = bool(self.embedding_provider and self.embedding_provider.is_available)
+        prov_name = self.embedding_provider.provider_name if self.embedding_provider else "noop"
+        model_name = self.embedding_provider.model_name if self.embedding_provider else "none"
+        vec_count = self.repository.get_vector_count()
+
+        if emb_avail:
+            status = "operational"
+        elif fts5_ok:
+            status = "fallback_fts5_only"
+        else:
+            status = "degraded"
+
+        return {
+            "status": status,
+            "semantic_vector_active": emb_avail,
+            "provider": prov_name,
+            "model": model_name,
+            "fts5_available": fts5_ok,
+            "indexed_vectors": vec_count,
+        }

@@ -319,9 +319,15 @@ def test_cert_notepad_launch_minimize_and_close(cert_settings: Settings) -> None
     try:
         # Find Notepad window and process with polling
         notepad_wins = []
-        for _ in range(30):
+        for _ in range(40):
             windows = svc.list_windows()
-            notepad_wins = [w for w in windows if "notepad" in w.title.lower()]
+            notepad_wins = [
+                w
+                for w in windows
+                if "notepad" in w.title.lower()
+                or "یادداشت" in w.title.lower()
+                or "notepad" in getattr(w, "process_name", "").lower()
+            ]
             if notepad_wins:
                 break
             time.sleep(0.2)

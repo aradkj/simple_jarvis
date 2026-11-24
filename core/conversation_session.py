@@ -72,6 +72,10 @@ class ConversationSessionContext:
     last_created_directory_path: Path | None = None
     last_created_directory_name: str | None = None
     last_target_directory_type: str | None = None
+    explicit_constraints: list[str] = field(default_factory=list)
+    recent_decisions: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_tasks: list[str] = field(default_factory=list)
+    verified_outcomes: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def language_preference(self) -> str:
@@ -568,6 +572,141 @@ class ConversationSessionManager:
                 inferred["resolved_filename"] = fname
 
             return resolved_text, inferred
+
+    def assemble_prioritized_context(
+        self,
+        session_id: str,
+        latest_instruction: str,
+        safety_constraints: list[str] | None = None,
+        active_task: str | None = None,
+        history: list[ConversationMessage] | None = None,
+        persistent_preferences: list[str] | None = None,
+        memory_context: str | None = None,
+        general_assumptions: list[str] | None = None,
+        max_chars: int = 4000,
+    ) -> str:
+        """Assemble strictly prioritized context satisfying Section 5.1 requirements.
+
+        Priority Order:
+        1. Latest explicit user instruction (highest priority, overrides older preferences)
+        2. Explicit safety and authorization constraints
+        3. Current active task
+        4. Relevant recent conversation (bounded)
+        5. Verified persistent user preferences
+        6. Relevant long-term memory
+        7. General assumptions (lowest priority)
+        """
+        sections: list[str] = []
+        char_count = 0
+
+        def _add_section(title: str, content: str) -> None:
+            nonlocal char_count
+            if not content.strip():
+                return
+            formatted = f"[{title}]\n{content.strip()}\n"
+            if char_count + len(formatted) <= max_chars:
+                sections.append(formatted)
+                char_count += len(formatted)
+
+        # 1. Latest explicit instruction
+        _add_section("LATEST USER INSTRUCTION", latest_instruction)
+
+        # 2. Safety and authorization constraints
+        if safety_constraints:
+            constraints_text = "\n".join(f"- {c}" for c in safety_constraints)
+            _add_section("SAFETY AND AUTHORIZATION CONSTRAINTS", constraints_text)
+
+        # 3. Current active task
+        if active_task:
+            _add_section("ACTIVE TASK STATE", active_task)
+
+        # 4. Relevant recent conversation
+        if history:
+            recent_conv = self.build_bounded_context(
+                session_id, history, max_turns=6, max_chars=1200
+            )
+            if recent_conv:
+                _add_section("RECENT CONVERSATION", recent_conv)
+
+        # 5. Verified persistent user preferences
+        if persistent_preferences:
+            pref_text = "\n".join(f"- {p}" for p in persistent_preferences)
+            _add_section("VERIFIED USER PREFERENCES", pref_text)
+
+        # 6. Relevant long-term memory
+        if memory_context:
+            _add_section("RELEVANT RETRIEVED MEMORY", memory_context)
+
+        # 7. General assumptions
+        if general_assumptions:
+            assumptions_text = "\n".join(f"- {a}" for a in general_assumptions)
+            _add_section("GENERAL ASSUMPTIONS", assumptions_text)
+
+        return "\n".join(sections)
+
+    def compress_conversation_context(
+        self,
+        history: list[ConversationMessage],
+        session: ConversationSessionContext,
+        max_recent_turns: int = 4,
+    ) -> dict[str, Any]:
+        """Compress long conversation while strictly preserving facts, decisions, and constraints (Section 5.2).
+
+        Guarantees:
+        - Never hallucinates or invents unmentioned facts
+        - Preserves key entities, active projects, and file paths
+        - Preserves unresolved tasks and explicit constraints
+        - Preserves verified execution outcomes
+        - Retains source message provenance
+        """
+        if len(history) <= max_recent_turns:
+            return {
+                "compressed": False,
+                "summary": "",
+                "preserved_entities": session.entities,
+                "recent_history": history,
+            }
+
+        older_messages = history[:-max_recent_turns]
+        recent_messages = history[-max_recent_turns:]
+
+        # Extract verified facts without hallucination
+        preserved_facts: list[str] = []
+        if session.active_project_name:
+            preserved_facts.append(f"Active Project: {session.active_project_name}")
+        if session.active_project_path:
+            preserved_facts.append(f"Project Path: {session.active_project_path}")
+        if session.active_file_path:
+            preserved_facts.append(f"Active File: {session.active_file_path}")
+        if session.explicit_constraints:
+            preserved_facts.append(f"Active Constraints: {', '.join(session.explicit_constraints)}")
+        if session.unresolved_tasks:
+            preserved_facts.append(f"Unresolved Tasks: {', '.join(session.unresolved_tasks)}")
+
+        # Provenance tracking
+        provenance = {
+            "compressed_turns": len(older_messages),
+            "start_timestamp": older_messages[0].created_at.isoformat()
+            if hasattr(older_messages[0], "created_at")
+            else "",
+            "end_timestamp": older_messages[-1].created_at.isoformat()
+            if hasattr(older_messages[-1], "created_at")
+            else "",
+            "preserved_fact_count": len(preserved_facts),
+        }
+
+        summary_text = (
+            f"Preserved Session Context ({len(older_messages)} earlier turns compacted):\n"
+            + "\n".join(f"- {f}" for f in preserved_facts)
+        )
+
+        return {
+            "compressed": True,
+            "summary": summary_text,
+            "preserved_facts": preserved_facts,
+            "recent_history": recent_messages,
+            "provenance": provenance,
+        }
 
     def build_bounded_context(
         self,

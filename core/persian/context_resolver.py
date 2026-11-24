@@ -62,6 +62,25 @@ class ReferenceResolutionEngine:
         (re.compile(r"\b(توش|توی\s+اون|داخلش|داخل\s+آن)\b", re.IGNORECASE), "inside_target"),
         (re.compile(r"\b(روش|روی\s+اون|روی\s+آن)\b", re.IGNORECASE), "on_target"),
         (re.compile(r"\b(صداش|ولومش|صدای\s+اون)\b", re.IGNORECASE), "voice_volume"),
+        (
+            re.compile(r"\b(همون|همان)?\s*(پروژه|مخزن|ریپو)\s+قبلی\b", re.IGNORECASE),
+            "previous_project",
+        ),
+        (
+            re.compile(r"\b(همون|همان)?\s*(مشکل|ارور|خطا|باگ|ایراد)\s+قبلی\b", re.IGNORECASE),
+            "previous_issue",
+        ),
+        (
+            re.compile(
+                r"\b(از\s+جایی\s+که\s+متوقف\s+شدیم\s+ادامه\s+بده|ادامه‌اش\s+بده|ادامش\s+بده|ادامه\s+بده|تسک\s+قبلی\s+رو\s+ادامه\s+بده)\b",
+                re.IGNORECASE,
+            ),
+            "resume_task",
+        ),
+        (
+            re.compile(r"\b(آخرین|قبلی)\s+(فایل|پروژه|کامیت|تغییر)\b", re.IGNORECASE),
+            "last_entity",
+        ),
         (re.compile(r"\b(اون|آن|این)\s+(?:رو|را)\b", re.IGNORECASE), "the_same"),
         (re.compile(r"\b(اون|آن)\b", re.IGNORECASE), "the_same"),
         (re.compile(r"\b(تست‌هاش|تست هاش|تستاش)\b", re.IGNORECASE), "target_tests"),
@@ -179,6 +198,27 @@ class ReferenceResolutionEngine:
                 resolved[ref_phrase] = "referenced_option_target"
             elif ref_type == "resume_previous_topic":
                 resolved[ref_phrase] = "previous_topic_resumed"
+            elif ref_type == "previous_project":
+                if active_project:
+                    resolved[ref_phrase] = active_project
+                elif fallback_project:
+                    resolved[ref_phrase] = fallback_project
+                    active_project = fallback_project
+                else:
+                    unresolved.append(ref_phrase)
+            elif ref_type == "previous_issue":
+                resolved[ref_phrase] = "previous_reported_issue"
+            elif ref_type == "resume_task":
+                resolved[ref_phrase] = "resume_interrupted_or_pending_task"
+            elif ref_type == "last_entity":
+                if "فایل" in ref_phrase and active_file:
+                    resolved[ref_phrase] = active_file
+                elif (
+                    "پروژه" in ref_phrase or "ریپو" in ref_phrase or "مخزن" in ref_phrase
+                ) and active_project:
+                    resolved[ref_phrase] = active_project
+                else:
+                    unresolved.append(ref_phrase)
 
         # 4. Check user corrections
         for corr_pat in self.CORRECTION_PATTERNS:

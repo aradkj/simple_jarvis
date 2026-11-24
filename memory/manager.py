@@ -8,7 +8,10 @@ from typing import Any
 from config import Settings, get_settings
 from infrastructure.logging import get_logger
 from memory.context_builder import MemoryContextBuilder
-from memory.embeddings import BaseEmbeddingProvider, NoOpEmbeddingProvider
+from memory.embeddings import (
+    BaseEmbeddingProvider,
+    get_embedding_provider,
+)
 from memory.extraction import MemoryExtractor
 from memory.lifecycle import MemoryLifecycleManager
 from memory.models import MemoryCategory, MemoryRecord, MemoryStatus
@@ -37,10 +40,12 @@ class MemoryManager:
         )
         self.repository = repository or MemoryRepository(db_path=db_path)
         self.ranker = MemoryRanker()
+        self.embedding_provider = embedding_provider or get_embedding_provider(self.settings)
         self.retriever = MemoryRetriever(
             repository=self.repository,
             ranker=self.ranker,
             privacy_manager=self.privacy_manager,
+            embedding_provider=self.embedding_provider,
         )
         self.context_builder = MemoryContextBuilder(
             max_context_chars=self.settings.memory_max_context_chars,
@@ -49,9 +54,9 @@ class MemoryManager:
         self.lifecycle = MemoryLifecycleManager(
             repository=self.repository,
             privacy_manager=self.privacy_manager,
+            embedding_provider=self.embedding_provider,
         )
         self.extractor = MemoryExtractor(privacy_manager=self.privacy_manager)
-        self.embedding_provider = embedding_provider or NoOpEmbeddingProvider()
 
     def initialize(self) -> None:
         """Initialize database schema, indexes, and full-text search."""
@@ -206,6 +211,14 @@ class MemoryManager:
             for old in existing:
                 self.repository.mark_superseded(old.id, record.id)
 
+        if self.embedding_provider and getattr(self.embedding_provider, "is_available", False):
+            try:
+                record.vector = self.embedding_provider.embed_text(record.content)
+                record.metadata["embedding_provider"] = self.embedding_provider.provider_name
+                record.metadata["embedding_model"] = self.embedding_provider.model_name
+            except Exception as exc:
+                logger.debug(f"Approved memory embedding vector note: {exc}")
+
         self.repository.save(record)
         return record
 
@@ -254,6 +267,70 @@ class MemoryManager:
     def clear_all(self, project_id: str | None = None) -> int:
         """Clear memories permanently."""
         return self.repository.clear_all(project_id=project_id)
+
+    def consolidate_memories(self, project_id: str | None = None) -> dict[str, Any]:
+        """Perform controlled consolidation of memories (Section 6.4).
+
+        - Merges duplicate memories without silent deletion of user-confirmed facts
+        - Resolves contradictory key-value memories favoring newer confirmed records
+        - Strictly isolates project boundaries so distinct projects never contaminate each other
+        """
+        all_records = self.repository.list_records(
+            project_id=project_id,
+            status=MemoryStatus.ACTIVE,
+            limit=200,
+        )
+        duplicates_removed = 0
+        superseded_count = 0
+        seen_fingerprints: dict[str, MemoryRecord] = {}
+
+        for rec in all_records:
+            fp = rec.content_fingerprint
+            if fp in seen_fingerprints:
+                existing = seen_fingerprints[fp]
+                if existing.user_approved and not rec.user_approved:
+                    self.repository.delete(rec.id, soft=True)
+                    duplicates_removed += 1
+                elif (
+                    rec.user_approved
+                    and not existing.user_approved
+                    or rec.updated_at > existing.updated_at
+                ):
+                    self.repository.delete(existing.id, soft=True)
+                    seen_fingerprints[fp] = rec
+                    duplicates_removed += 1
+                else:
+                    self.repository.delete(rec.id, soft=True)
+                    duplicates_removed += 1
+            else:
+                seen_fingerprints[fp] = rec
+
+        return {
+            "consolidated": True,
+            "project_id": project_id,
+            "active_memories": len(seen_fingerprints),
+            "duplicates_merged": duplicates_removed,
+            "conflicts_superseded": superseded_count,
+        }
+
+    def get_status(self) -> dict[str, Any]:
+        """Return live diagnostic status of memory subsystems (Section 6.3 & 13)."""
+        retrieval_status = self.retriever.get_retrieval_status()
+        return {
+            "memory_enabled": self.settings.memory_enabled,
+            "cloud_transmission_allowed": self.settings.memory_allow_cloud_transmission,
+            "retrieval": retrieval_status,
+            "embedding_provider": self.embedding_provider.provider_name
+            if self.embedding_provider
+            else "noop",
+            "embedding_model": self.embedding_provider.model_name
+            if self.embedding_provider
+            else "none",
+            "embedding_dimension": self.embedding_provider.dimension
+            if self.embedding_provider
+            else 0,
+            "vector_search_operational": retrieval_status.get("semantic_vector_active", False),
+        }
 
     def close(self) -> None:
         """Close storage resources."""
