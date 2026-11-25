@@ -395,6 +395,46 @@ class PersianIntentAnalyzer:
                 break
         return list(dict.fromkeys(secondaries))
 
+    def extract_preconditions(self, text: str) -> list[str]:
+        """Extract conditional preconditions from instruction statements."""
+        preconditions: list[str] = []
+        lower = text.lower()
+
+        # Conditional markers: اگر, اگه, در صورتی که, چنانچه, به شرطی که, if, in case
+        cond_patterns = [
+            (
+                re.compile(
+                    r"(?:اگر|اگه|چنانچه|در\s*صورتی\s*که)\s+(.+?)\s+(?:بود|شد|نبود|نشد|پاس\s*شد|خطا\s*داد|موجود\s*نبود|باز\s*بود|بسته\s*بود)",
+                    re.IGNORECASE,
+                ),
+                "condition",
+            ),
+            (
+                re.compile(
+                    r"if\s+(.+?)\s+(?:exists|fails|passes|is\s+open|is\s+running|not\s+found)",
+                    re.IGNORECASE,
+                ),
+                "condition_en",
+            ),
+        ]
+        for pat, _kind in cond_patterns:
+            matches = pat.findall(lower)
+            for m in matches:
+                clean_cond = str(m).strip()
+                if clean_cond:
+                    preconditions.append(clean_cond)
+
+        if "اگر خطایی" in lower or "در صورت خطا" in lower or "if error" in lower:
+            preconditions.append("on_error_detected")
+        if "اگر وجود نداشت" in lower or "در صورت عدم وجود" in lower or "if not exists" in lower:
+            preconditions.append("target_does_not_exist")
+        if "اگر باز بود" in lower or "در صورتی که باز است" in lower:
+            preconditions.append("target_is_open")
+        if "اگر تست‌ها پاس شدند" in lower or "در صورت موفقیت تست‌ها" in lower:
+            preconditions.append("tests_pass")
+
+        return list(dict.fromkeys(preconditions))
+
     def extract_constraints(self, text: str) -> tuple[list[str], list[str]]:
         """Extract operational constraints and prohibited actions from instructions (Section 3.5 & 4)."""
         constraints: list[str] = []
@@ -412,10 +452,14 @@ class PersianIntentAnalyzer:
                 "اطلاعات قبلی حذف نشود",
                 "حذف نشود",
                 "پاک نشه",
+                "پاک نکن",
+                "حذف نکن",
+                "از بین نره",
+                "از دست نره",
+                "مراقب باش",
                 "حفظ کن",
                 "حفظش کن",
                 "بدون اجازه",
-                "حذف نکن",
                 "preserve data",
                 "do not lose data",
             )
@@ -430,13 +474,21 @@ class PersianIntentAnalyzer:
                 "فقط ببین",
                 "فقط بررسی کن",
                 "فقط بخوان",
+                "فقط بخون",
+                "بخون",
+                "بخوان",
                 "فقط نگاه کن",
+                "فقط لیست کن",
+                "رو بخون",
+                "را بخون",
+                "رو بخوان",
                 "دست نزن",
                 "دست به",
                 "دست به هیچی نزن",
                 "تغییر نده",
                 "ویرایش نکن",
                 "ادیت نکن",
+                "عوض نکن",
                 "تغییری",
                 "read only",
                 "do not modify",
@@ -452,15 +504,22 @@ class PersianIntentAnalyzer:
         ):
             constraints.append("maintain_stability")
 
-        # Specific prohibited targets
+        # Specific prohibited targets and negative verbs
         m1 = re.findall(r"دست\s*به\s+(.+?)\s*نزن", lower)
-        m2 = re.findall(r"(?:به\s+)(.+?)\s*(?:دست\s*نزن|تغییر\s*نده|پاک\s*نکن)", lower)
-        for target in m1 + m2:
+        m2 = re.findall(
+            r"(?:به\s+)(.+?)\s*(?:دست\s*نزن|تغییر\s*نده|پاک\s*نکن|حذف\s*نکن|دسترسی\s*نداشته\s*باش)",
+            lower,
+        )
+        m3 = re.findall(
+            r"([a-zA-Z0-9_\-\.\u200c]+|[آ-ی\s\u200c]+?)\s*(?:رو|را)?\s*(?:پاک\s*نکن|حذف\s*نکن|دیلیت\s*نکن|تغییر\s*نده|دستکاری\s*نکن|عوض\s*نکن)",
+            lower,
+        )
+        for target in m1 + m2 + m3:
             target_clean = target.strip()
-            if target_clean and target_clean not in ("هیچی", "چیزی"):
+            if target_clean and target_clean not in ("هیچی", "چیزی", "این", "آن", "اون"):
                 prohibitions.append(f"do_not_touch_{target_clean}")
 
-        return constraints, prohibitions
+        return constraints, list(dict.fromkeys(prohibitions))
 
     def detect_ambiguities(
         self,
@@ -477,6 +536,10 @@ class PersianIntentAnalyzer:
         for pat in self.AMBIGUOUS_DESTRUCTIVE_PATTERNS:
             if pat.search(lower):
                 ambiguities.append("broad_destructive_scope_unspecified_targets")
+
+        # Explicit user confirmation gate
+        if any(k in lower for k in ("بعد از تایید", "با تایید من", "با تایید کاربر")):
+            ambiguities.append("requires_user_confirmation")
 
         # Unclear relative reference without context
         if (
@@ -521,6 +584,7 @@ class PersianIntentAnalyzer:
             k in norm_text.lower() for k in ("فقط ببین", "بررسی کن", "inspect only")
         )
         requires_clarify = len(ambiguities) > 0 or is_ambig
+        preconditions = self.extract_preconditions(norm_text)
 
         action = "conversation"
         if primary == PersianIntentType.FILE_OPERATION:
@@ -544,6 +608,35 @@ class PersianIntentAnalyzer:
         if primary == PersianIntentType.APPLICATION_CONTROL:
             risks.append("process_termination_or_launch")
 
+        # Contextual reference resolution
+        resolved_refs: dict[str, str] = {}
+        unresolved_refs: list[str] = []
+        active_proj: str | None = None
+        active_f: str | None = None
+
+        if context:
+            from core.persian.context_resolver import ReferenceResolutionEngine
+
+            resolver = ReferenceResolutionEngine()
+            history = (
+                getattr(context, "turns", [])
+                if hasattr(context, "turns")
+                else (context.get("turns", []) if isinstance(context, dict) else [])
+            )
+            fallback_proj = getattr(context, "active_project_name", None) or (
+                context.get("active_project") if isinstance(context, dict) else None
+            )
+            fallback_f = getattr(context, "active_file_path", None) or (
+                context.get("active_file") if isinstance(context, dict) else None
+            )
+            resolved_refs, unresolved_refs, active_proj, active_f = resolver.resolve(
+                current_text=norm_text,
+                entities=entities or [],
+                history=history,
+                fallback_project=fallback_proj,
+                fallback_file=str(fallback_f) if fallback_f else None,
+            )
+
         return SemanticInterpretation(
             raw_input=text,
             normalized_text=norm_text,
@@ -551,7 +644,7 @@ class PersianIntentAnalyzer:
             primary_intent=primary,
             secondary_intents=secondaries,
             requested_action=action,
-            target_entity=entities[0].name if entities else None,
+            target_entity=entities[0].name if entities else (active_f or active_proj),
             relevant_objects=[
                 e.name for e in (entities or []) if e.entity_type in ("file", "app", "project")
             ],
@@ -559,7 +652,8 @@ class PersianIntentAnalyzer:
                 e.name for e in (entities or []) if e.entity_type in ("directory", "file_path")
             ],
             constraints=constraints,
-            preconditions=[],
+            prohibited_actions=prohibitions,
+            preconditions=preconditions,
             desired_outcome="execute requested action safely"
             if not is_hypo
             else "provide hypothetical analysis",
@@ -581,9 +675,9 @@ class PersianIntentAnalyzer:
             is_hypothetical=is_hypo,
             is_read_only=is_read_only,
             extracted_entities=entities or [],
-            resolved_references={},
-            unresolved_references=[],
-            active_project=None,
-            active_file=None,
+            resolved_references=resolved_refs,
+            unresolved_references=unresolved_refs,
+            active_project=active_proj,
+            active_file=active_f,
             response_language="en",
         )

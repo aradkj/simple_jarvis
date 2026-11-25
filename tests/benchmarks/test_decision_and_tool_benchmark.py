@@ -60,13 +60,80 @@ RISK_EVALUATION_CASES = [
     ("post_message", {"channel": "notifications"}, RiskLevel.EXTERNAL_COMMUNICATION),
 ]
 
-for idx in range(10):
+# Low risk probes and capability-checked operations (60+ cases)
+for idx in range(30):
     RISK_EVALUATION_CASES.append(
         (
             f"read_file_probe_{idx}",
             {"path": f"probe_{idx}.txt"},
             RiskLevel.READ_ONLY,
         )
+    )
+
+# Safe recognized read-only tools
+for safe_tool in [
+    "weather_current",
+    "weather_forecast",
+    "coding_agent_status",
+    "system_info",
+    "windows_window_read",
+    "windows_display_read",
+    "windows_audio_read",
+    "windows_app_read",
+    "memory_search",
+    "datetime_query",
+    "browser_read",
+    "browser_tab",
+]:
+    RISK_EVALUATION_CASES.append((safe_tool, {}, RiskLevel.READ_ONLY))
+
+# Sensitive credentials & keys
+for sens_k in [
+    "password",
+    "secret",
+    "token",
+    "credential",
+    "private_key",
+    "api_key",
+    "auth_token",
+    "cvv",
+    "ssn",
+    "credit_card",
+    "پسورد",
+    "رمز",
+    "کلید",
+]:
+    RISK_EVALUATION_CASES.append(
+        ("probe_inspect", {sens_k: "val123"}, RiskLevel.SENSITIVE_DATA_ACCESS)
+    )
+
+# Fail-closed unknown tools
+for unk_tool in [
+    "unregistered_runner",
+    "mystery_binary",
+    "custom_eval_tool",
+    "remote_shell_probe",
+    "unknown_hook",
+]:
+    RISK_EVALUATION_CASES.append((unk_tool, {}, RiskLevel.DESTRUCTIVE_OPERATION))
+
+# Destructive flags & irreversible operations
+for flag in ["force", "all", "recursive", "permanent", "purge", "hard"]:
+    RISK_EVALUATION_CASES.append(("delete_data", {flag: True}, RiskLevel.IRREVERSIBLE_OPERATION))
+    RISK_EVALUATION_CASES.append(("remove_tree", {flag: True}, RiskLevel.IRREVERSIBLE_OPERATION))
+
+# Reversible modifications
+for mod_tool in [
+    "write_file",
+    "create_dir",
+    "modify_file",
+    "update_config",
+    "rename_file",
+    "touch_file",
+    "append_file",
+]:
+    RISK_EVALUATION_CASES.append(
+        (mod_tool, {"path": "src/module.py"}, RiskLevel.REVERSIBLE_MODIFICATION)
     )
 
 # ==============================================================================
@@ -159,3 +226,229 @@ def test_benchmark_decision_engine_action_selection_and_records():
         complexity=TaskComplexity.MULTI_STEP_PLANNING,
     )
     assert action == ActionType.CREATE_PLAN
+
+
+GATEWAY_EVALUATION_CASES = [
+    # (tool_name, params, agent_mode, auto_approve, expected_allowed, expected_risk, expected_approval)
+    ("weather_current", {}, "balanced", False, True, RiskLevel.READ_ONLY, False),
+    ("file_search", {"query": "readme"}, "autonomous", False, True, RiskLevel.READ_ONLY, False),
+    ("system_info", {}, "strict", True, True, RiskLevel.READ_ONLY, False),
+    ("read_file", {"path": "main.py"}, "balanced", False, True, RiskLevel.READ_ONLY, False),
+    ("windows_window_read", {}, "autonomous", False, True, RiskLevel.READ_ONLY, False),
+    # Reversible modifications
+    (
+        "write_file",
+        {"path": "test.txt"},
+        "autonomous",
+        False,
+        True,
+        RiskLevel.REVERSIBLE_MODIFICATION,
+        False,
+    ),
+    (
+        "create_dir",
+        {"path": "build/"},
+        "balanced",
+        False,
+        True,
+        RiskLevel.REVERSIBLE_MODIFICATION,
+        True,
+    ),
+    (
+        "create_dir",
+        {"path": "build/"},
+        "balanced",
+        True,
+        True,
+        RiskLevel.REVERSIBLE_MODIFICATION,
+        False,
+    ),
+    (
+        "modify_file",
+        {"path": "notes.md"},
+        "autonomous",
+        False,
+        True,
+        RiskLevel.REVERSIBLE_MODIFICATION,
+        False,
+    ),
+    (
+        "rename_file",
+        {"old": "a", "new": "b"},
+        "strict",
+        False,
+        True,
+        RiskLevel.REVERSIBLE_MODIFICATION,
+        True,
+    ),
+    # Destructive operations: ALWAYS require approval
+    (
+        "delete_file",
+        {"path": "file.txt"},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.DESTRUCTIVE_OPERATION,
+        True,
+    ),
+    (
+        "remove_dir",
+        {"path": "data/"},
+        "autonomous",
+        False,
+        True,
+        RiskLevel.DESTRUCTIVE_OPERATION,
+        True,
+    ),
+    ("drop_table", {"name": "users"}, "strict", True, True, RiskLevel.DESTRUCTIVE_OPERATION, True),
+    (
+        "wipe_cache",
+        {"target": "all"},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.IRREVERSIBLE_OPERATION,
+        True,
+    ),
+    (
+        "format_drive",
+        {"drive": "C:", "force": True},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.IRREVERSIBLE_OPERATION,
+        True,
+    ),
+    (
+        "delete_all",
+        {"force": True},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.IRREVERSIBLE_OPERATION,
+        True,
+    ),
+    ("wipe_all", {"all": True}, "autonomous", True, True, RiskLevel.IRREVERSIBLE_OPERATION, True),
+    # Sensitive credentials: ALWAYS require approval
+    (
+        "read_secret",
+        {"password": "pwd"},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.SENSITIVE_DATA_ACCESS,
+        True,
+    ),
+    (
+        "get_token",
+        {"token": "secret"},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.SENSITIVE_DATA_ACCESS,
+        True,
+    ),
+    (
+        "query_keys",
+        {"private_key": "rsa"},
+        "balanced",
+        False,
+        True,
+        RiskLevel.SENSITIVE_DATA_ACCESS,
+        True,
+    ),
+    # External communication
+    (
+        "send_email",
+        {"to": "a@b.com"},
+        "balanced",
+        False,
+        True,
+        RiskLevel.EXTERNAL_COMMUNICATION,
+        True,
+    ),
+    (
+        "send_email",
+        {"to": "a@b.com"},
+        "balanced",
+        True,
+        True,
+        RiskLevel.EXTERNAL_COMMUNICATION,
+        False,
+    ),
+    (
+        "whatsapp_send",
+        {"msg": "hi"},
+        "autonomous",
+        False,
+        True,
+        RiskLevel.EXTERNAL_COMMUNICATION,
+        True,
+    ),
+    (
+        "whatsapp_send",
+        {"msg": "hi"},
+        "autonomous",
+        True,
+        True,
+        RiskLevel.EXTERNAL_COMMUNICATION,
+        False,
+    ),
+    (
+        "cloud_transmit",
+        {"target": "cloud"},
+        "strict",
+        False,
+        True,
+        RiskLevel.EXTERNAL_COMMUNICATION,
+        True,
+    ),
+]
+
+# Probes for bounded gateway
+for p_idx in range(10):
+    GATEWAY_EVALUATION_CASES.append(
+        (
+            f"read_file_{p_idx}",
+            {"path": f"doc_{p_idx}.txt"},
+            "autonomous",
+            False,
+            True,
+            RiskLevel.READ_ONLY,
+            False,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_name,params,agent_mode,auto_approve,expected_allowed,expected_risk,expected_approval",
+    GATEWAY_EVALUATION_CASES,
+)
+def test_benchmark_decision_gateway_authorization(
+    tool_name: str,
+    params: dict,
+    agent_mode: str,
+    auto_approve: bool,
+    expected_allowed: bool,
+    expected_risk: RiskLevel,
+    expected_approval: bool,
+):
+    """Benchmark: DecisionEngine mandatory execution gateway enforces risk boundaries and approval policies (35 cases)."""
+
+    class MockContext:
+        def __init__(self, mode: str, approve: bool) -> None:
+            self.agent_mode = mode
+            self.auto_approve = approve
+
+    engine = DecisionEngine()
+    ctx = MockContext(mode=agent_mode, approve=auto_approve)
+    allowed, risk, req_approval, rationale = engine.evaluate_tool_execution(
+        tool_name=tool_name,
+        params=params,
+        context=ctx,
+    )
+    assert allowed == expected_allowed
+    assert risk == expected_risk
+    assert req_approval == expected_approval, (
+        f"For tool {tool_name} (mode={agent_mode}, auto_approve={auto_approve}): expected approval={expected_approval}, got {req_approval} ({rationale})"
+    )

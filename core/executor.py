@@ -12,6 +12,7 @@ from typing import Any
 from ai.manager import ProviderManager
 from config import Settings, get_settings
 from core.approval import ApprovalManager
+from core.decision import DecisionEngine, map_to_proposal_risk
 from core.events import AgentEvent, AgentEventType, EventBus
 from core.execution_context import ExecutionContext
 from core.permissions import (
@@ -85,6 +86,7 @@ class AgentExecutor:
         approval_manager: ApprovalManager | None = None,
         settings: Settings | None = None,
         event_bus: EventBus | None = None,
+        decision_engine: DecisionEngine | None = None,
     ) -> None:
         self.tool_registry = tool_registry
         self.provider_manager = provider_manager
@@ -92,6 +94,7 @@ class AgentExecutor:
         self.state_machine = state_machine
         self.permission_manager = permission_manager or tool_registry.permission_manager
         self.settings = settings or get_settings()
+        self.decision_engine = decision_engine or DecisionEngine()
         if self.planner and hasattr(self.planner, "settings"):
             self.planner.settings = self.settings
         self.event_bus = event_bus
@@ -433,10 +436,6 @@ class AgentExecutor:
                 step.error = f"Tool '{step.tool_name}' is not registered."
                 return "replan_needed"
 
-            tool_def = tool.get_definition() if hasattr(tool, "get_definition") else None
-            risk = tool_def.risk_level if tool_def else RiskLevel.LOW
-            req_approval = tool_def.requires_approval if tool_def else False
-
             # Create proposal bound to session
             proposal_args = dict(step.parameters)
             if step.tool_name in ("windows_power_restart", "windows_power_shutdown"):
@@ -461,8 +460,7 @@ class AgentExecutor:
                     "subscribe",
                 )
                 if any(m in sel for m in sensitive_markers):
-                    risk = RiskLevel.HIGH
-                    req_approval = True
+                    proposal_args["_browser_sensitive"] = True
             elif step.tool_name == "browser_fill_field":
                 sel = str(proposal_args.get("selector", "")).lower()
                 if (
@@ -484,8 +482,25 @@ class AgentExecutor:
                     )
                     or proposal_args.get("press_enter") is True
                 ):
-                    risk = RiskLevel.HIGH
-                    req_approval = True
+                    proposal_args["_browser_sensitive"] = True
+
+            # Mandatory Central Decision Gateway: Evaluate tool capability, risk, and approval requirements
+            tool_meta = tool.get_capabilities() if hasattr(tool, "get_capabilities") else None
+            _allowed, p_risk, dec_req_approval, rationale = (
+                self.decision_engine.evaluate_tool_execution(
+                    tool_name=step.tool_name,
+                    params=proposal_args,
+                    context=context,
+                    tool_instance=tool,
+                    tool_metadata=tool_meta,
+                )
+            )
+            risk = map_to_proposal_risk(p_risk)
+            tool_def = tool.get_definition() if hasattr(tool, "get_definition") else None
+            req_approval = dec_req_approval or (tool_def.requires_approval if tool_def else False)
+            if proposal_args.get("_browser_sensitive"):
+                risk = RiskLevel.HIGH
+                req_approval = True
 
             proposal = ToolProposal(
                 session_id=context.session_id,
@@ -493,7 +508,7 @@ class AgentExecutor:
                 arguments=proposal_args,
                 risk_level=risk,
                 requires_approval=req_approval,
-                rationale=step.description,
+                rationale=step.description or rationale,
             )
             step.tool_proposal_id = proposal.proposal_id
 
@@ -622,6 +637,21 @@ class AgentExecutor:
             )
 
             if tool_res.status == ToolExecutionStatus.SUCCESS:
+                # Independent Outcome Verification against ground truth
+                is_verified, v_reason = self._verify_postcondition(
+                    tool_name=step.tool_name,
+                    params=exec_params,
+                    result_data=tool_res.data,
+                )
+                if not is_verified:
+                    logger.warning(
+                        f"Independent verification failed for tool '{step.tool_name}': {v_reason}"
+                    )
+                    proposal.mark_failed(v_reason)
+                    step.status = StepStatus.FAILED
+                    step.error = v_reason
+                    return "replan_needed"
+
                 proposal.mark_executed(tool_res.data)
                 step.status = StepStatus.COMPLETED
                 step.result = tool_res.data
@@ -1191,6 +1221,49 @@ class AgentExecutor:
 
         step.status = StepStatus.COMPLETED
         return "success"
+
+    def _verify_postcondition(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        result_data: Any,
+    ) -> tuple[bool, str]:
+        """Perform independent post-condition verification against real OS/system state."""
+        try:
+            if tool_name in ("file_create_directory", "file_mkdir"):
+                dir_path = (
+                    (result_data.get("directory_path") if isinstance(result_data, dict) else None)
+                    or params.get("directory_path")
+                    or params.get("path")
+                )
+                if dir_path:
+                    p = Path(dir_path)
+                    if not p.exists() or not p.is_dir():
+                        return (
+                            False,
+                            f"Post-condition failed: Directory {dir_path} does not exist on disk.",
+                        )
+
+            elif tool_name in ("file_write", "file_create"):
+                file_path = (
+                    (result_data.get("file_path") if isinstance(result_data, dict) else None)
+                    or params.get("file_path")
+                    or params.get("path")
+                )
+                if file_path:
+                    p = Path(file_path)
+                    if not p.exists() or not p.is_file():
+                        return (
+                            False,
+                            f"Post-condition failed: File {file_path} does not exist on disk.",
+                        )
+
+            elif tool_name == "windows_power_shutdown" or tool_name == "windows_power_restart":
+                # Simulated power commands in tests
+                pass
+        except Exception as v_err:
+            logger.debug(f"Verification check exception: {v_err}")
+        return True, "Verified"
 
     def _synthesize_deterministic_outcome(self, successful_tools: list[PlanStep], goal: str) -> str:
         """Instantly build concise, natural British English response for deterministic actions."""

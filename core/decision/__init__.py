@@ -6,6 +6,8 @@ from core.decision.engine import (
     FailureRecoveryEngine,
     FailureRecoveryStrategy,
     RiskClassifier,
+    map_from_proposal_risk,
+    map_to_proposal_risk,
 )
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "FailureRecoveryEngine",
     "FailureRecoveryStrategy",
     "RiskClassifier",
+    "map_from_proposal_risk",
+    "map_to_proposal_risk",
 ]

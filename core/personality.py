@@ -477,15 +477,15 @@ class JarvisPersonalityEngine:
                 s
                 for s in outcome.plan.steps
                 if s.tool_name
-                in ("email_send", "whatsapp_send", "file_edit_text", "file_write_text")
                 and str(getattr(s, "status", "")).lower()
                 in ("failed", "cancelled", "stepstatus.failed")
             ]
             if failed_comms:
                 tool_failed = failed_comms[0].tool_name
+                err = failed_comms[0].error or outcome.error or "خطای نامشخص"
                 if language == "fa":
-                    return f"عملیات «{tool_failed}» با خطا مواجه شد و اجرا نشد."
-                return f"Operation '{tool_failed}' failed; operation was not executed."
+                    return f"عملیات «{tool_failed}» با خطا مواجه شد و اجرا نشد: {err}"
+                return f"Operation '{tool_failed}' failed and was not completed: {err}"
 
         # Check if a file_edit_text step succeeded in plan
         if hasattr(outcome, "plan") and outcome.plan and hasattr(outcome.plan, "steps"):

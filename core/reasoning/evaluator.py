@@ -21,21 +21,28 @@ from core.persian.models import DecisionOption, RiskLevel
 
 
 class AlternativeEvaluator:
-    """Evaluates multiple approaches systematically against engineering criteria."""
+    """Evaluates multiple approaches systematically against all 10 engineering criteria (Section 7.3)."""
 
     DEFAULT_WEIGHTS = {
-        "correctness": 0.25,
-        "security": 0.20,
+        "correctness": 0.20,
+        "security": 0.15,
         "reliability": 0.15,
         "reversibility": 0.10,
         "compatibility": 0.10,
-        "user_preferences": 0.10,
-        "execution_time": 0.05,
-        "complexity": 0.05,
+        "maintainability": 0.10,
+        "user_preferences": 0.08,
+        "complexity": 0.04,
+        "cost": 0.04,
+        "execution_time": 0.04,
     }
 
     def __init__(self, weights: dict[str, float] | None = None) -> None:
-        self.weights = weights or self.DEFAULT_WEIGHTS
+        raw_weights = weights or self.DEFAULT_WEIGHTS
+        total = sum(raw_weights.values())
+        if total > 0:
+            self.weights = {k: v / total for k, v in raw_weights.items()}
+        else:
+            self.weights = self.DEFAULT_WEIGHTS
 
     def evaluate_candidates(
         self,
@@ -44,7 +51,7 @@ class AlternativeEvaluator:
         constraints: list[str] | None = None,
         user_preferences: list[str] | None = None,
     ) -> list[DecisionOption]:
-        """Score candidate options across all trade-off dimensions and return ranked DecisionOption list."""
+        """Score candidate options across all 10 trade-off dimensions and return ranked DecisionOption list."""
         if not candidates:
             return []
 
@@ -59,7 +66,7 @@ class AlternativeEvaluator:
             risk = cand.get("risk_level", RiskLevel.READ_ONLY)
             raw_scores = cand.get("dimension_scores", {})
 
-            # Default scores (0.0 to 1.0)
+            # Default scores across all 10 canonical dimensions (0.0 to 1.0)
             scores = {
                 "correctness": float(raw_scores.get("correctness", 0.8)),
                 "security": float(
@@ -67,19 +74,21 @@ class AlternativeEvaluator:
                         "security",
                         0.9
                         if risk in (RiskLevel.READ_ONLY, RiskLevel.REVERSIBLE_MODIFICATION)
-                        else 0.5,
+                        else 0.4,
                     )
                 ),
                 "reliability": float(raw_scores.get("reliability", 0.8)),
                 "reversibility": float(
                     raw_scores.get(
-                        "reversibility", 0.9 if risk != RiskLevel.DESTRUCTIVE_OPERATION else 0.2
+                        "reversibility", 0.95 if risk != RiskLevel.DESTRUCTIVE_OPERATION else 0.2
                     )
                 ),
                 "compatibility": float(raw_scores.get("compatibility", 0.95)),
+                "maintainability": float(raw_scores.get("maintainability", 0.85)),
                 "user_preferences": float(raw_scores.get("user_preferences", 0.8)),
-                "execution_time": float(raw_scores.get("execution_time", 0.8)),
                 "complexity": float(raw_scores.get("complexity", 0.8)),
+                "cost": float(raw_scores.get("cost", 0.85)),
+                "execution_time": float(raw_scores.get("execution_time", 0.8)),
             }
 
             # Constraint penalty
@@ -103,7 +112,7 @@ class AlternativeEvaluator:
                     scores["user_preferences"] = min(1.0, scores["user_preferences"] + 0.15)
                     reasons.append("Aligns with user preference")
 
-            # Weighted aggregate score
+            # Weighted aggregate score across normalized weights
             total_score = sum(scores.get(dim, 0.5) * weight for dim, weight in self.weights.items())
             total_score = round(min(1.0, max(0.0, total_score)), 4)
 

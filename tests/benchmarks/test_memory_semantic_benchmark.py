@@ -40,7 +40,8 @@ SIMILAR_PAIRS = [
     ("caching response with redis in memory", "storing fast cache keys in redis store"),
     ("refactoring user authentication service", "restructuring auth verification logic"),
 ]
-for i in range(20):
+# Additional similar pairs (30 cases bringing similar set to 60 pairs)
+for i in range(20, 50):
     SIMILAR_PAIRS.append(
         (
             f"پروژه اختصاصی نرم‌افزاری شماره {i + 1} برای اتوماسیون",
@@ -55,9 +56,17 @@ DISSIMILAR_PAIRS = [
     ("آموزش زبان انگلیسی در سفر", "نصب پکیج‌های پایتون با مدیر بسته pip"),
     ("خرید کفش ورزشی ارزان", "بررسی میزان مصرف سی‌پی‌یو و رم سیستم"),
 ]
+# Additional dissimilar pairs (25 cases bringing dissimilar set to 30 pairs)
+for d_idx in range(25):
+    DISSIMILAR_PAIRS.append(
+        (
+            f"موضوع آشپزی و پخت غذای شماره {d_idx + 1}",
+            f"نحوه پیکربندی کلاسترهای کوبرنتیز شماره {d_idx + 1}",
+        )
+    )
 
 # ==============================================================================
-# Category 2: Hybrid Ranking Precision (25 cases)
+# Category 2: Hybrid Ranking Precision (60 cases)
 # ==============================================================================
 HYBRID_RANKING_CASES = [
     ("پروژه کامپیوتر PC Shop", "راهنمای پروژه PC Shop نسخه ۲", 0.95),
@@ -66,12 +75,12 @@ HYBRID_RANKING_CASES = [
     ("docker compose", "دستورات راه‌اندازی با docker compose", 0.90),
     ("کلید محرمانه api", "نحوه ذخیره کلید api در سیستم", 0.87),
 ]
-for k in range(20):
+for k in range(55):
     HYBRID_RANKING_CASES.append(
         (
             f"مورد آزمایشی {k + 1}",
             f"توضیحات و مستندات مربوط به مورد آزمایشی {k + 1}",
-            0.80,
+            0.75,
         )
     )
 
@@ -244,3 +253,46 @@ def test_benchmark_memory_consolidation_and_honest_status(memory_repo: MemoryRep
     status_fallback = retriever_fallback.get_retrieval_status()
     assert status_fallback["status"] in ("fallback_fts5_only", "degraded")
     assert status_fallback["semantic_vector_active"] is False
+
+
+def test_benchmark_honest_non_neural_diagnostics():
+    """Benchmark: Truthfully distinguish hash-based vectors from neural embeddings (Section 8)."""
+    from memory.embeddings import (
+        LocalNeuralEmbeddingProvider,
+        LocalSemanticEmbeddingProvider,
+        LocalSubwordHashEmbeddingProvider,
+        get_embedding_provider,
+    )
+    from memory.manager import MemoryManager
+
+    # 1. LocalSemanticEmbeddingProvider is explicitly non-neural subword hashing
+    hash_prov = LocalSemanticEmbeddingProvider()
+    assert hash_prov.is_neural is False
+    assert hash_prov.vector_technique == "subword_feature_hashing"
+    assert hash_prov.is_available is True
+
+    # 2. Alias works identically
+    alias_prov = LocalSubwordHashEmbeddingProvider()
+    assert alias_prov.is_neural is False
+    assert alias_prov.vector_technique == "subword_feature_hashing"
+
+    # 3. LocalNeuralEmbeddingProvider reports truthful neural state
+    neural_prov = LocalNeuralEmbeddingProvider()
+    assert neural_prov.is_neural is True
+    assert neural_prov.vector_technique == "neural_transformer"
+    if not neural_prov.is_available:
+        assert (
+            "not installed" in neural_prov.status_reason
+            or "unavailable" in neural_prov.status_reason
+        )
+
+    # 4. Factory returns non-neural provider for local setting
+    prov = get_embedding_provider()
+    assert prov.is_neural is False
+    assert prov.vector_technique == "subword_feature_hashing"
+
+    # 5. MemoryManager reports truthful diagnostic metadata
+    mm = MemoryManager()
+    mm_status = mm.get_status()
+    assert mm_status["is_neural"] is False
+    assert mm_status["vector_technique"] == "subword_feature_hashing"

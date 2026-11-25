@@ -85,6 +85,16 @@ class BaseEmbeddingProvider(ABC):
         """Compute cosine similarity between two vectors."""
         return cosine_similarity(v1, v2)
 
+    @property
+    def is_neural(self) -> bool:
+        """True if provider employs deep neural network / transformer weights."""
+        return False
+
+    @property
+    def vector_technique(self) -> str:
+        """Categorical vectorization algorithm utilized."""
+        return "none"
+
 
 class NoOpEmbeddingProvider(BaseEmbeddingProvider):
     """Default baseline embedding provider that performs no operations."""
@@ -113,11 +123,11 @@ class NoOpEmbeddingProvider(BaseEmbeddingProvider):
 
 
 class LocalSemanticEmbeddingProvider(BaseEmbeddingProvider):
-    """Deterministic local semantic embedding generator using n-gram feature hashing.
+    """Deterministic local subword feature hashing vectorizer (non-neural).
 
-    Produces reproducible L2-normalized unit vectors of fixed dimension without any
-    external API calls or large model files. High cosine similarity for semantically
-    and lexically related texts (Persian, English, bilingual).
+    Produces reproducible L2-normalized unit vectors of fixed dimension using
+    MD5-hashed subword tokens and n-grams without external APIs or model weights.
+    Accurately characterized as an offline subword hash vectorizer, not neural.
     """
 
     def __init__(self, dimension: int = 128) -> None:
@@ -126,6 +136,14 @@ class LocalSemanticEmbeddingProvider(BaseEmbeddingProvider):
     @property
     def is_available(self) -> bool:
         return True
+
+    @property
+    def is_neural(self) -> bool:
+        return False
+
+    @property
+    def vector_technique(self) -> str:
+        return "subword_feature_hashing"
 
     @property
     def provider_name(self) -> str:
@@ -180,6 +198,87 @@ class LocalSemanticEmbeddingProvider(BaseEmbeddingProvider):
         return [self.embed_text(t) for t in texts]
 
 
+# Alias for truthful nomenclature
+LocalSubwordHashEmbeddingProvider = LocalSemanticEmbeddingProvider
+
+
+class LocalNeuralEmbeddingProvider(BaseEmbeddingProvider):
+    """Local neural transformer embedding provider using sentence-transformers / ONNX.
+
+    Truthfully reports availability: if local neural runtime packages or model weights
+    are missing, it reports is_available=False and provides honest diagnostics,
+    never claiming neural capability when only subword hashing is present.
+    """
+
+    def __init__(
+        self,
+        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        dimension: int = 384,
+    ) -> None:
+        self._model_name = model_name
+        self._dim = dimension
+        self._model: Any = None
+        self._init_error: str | None = None
+        self._attempt_init()
+
+    def _attempt_init(self) -> None:
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            self._model = SentenceTransformer(self._model_name)
+            self._dim = int(self._model.get_sentence_embedding_dimension() or self._dim)
+        except ImportError:
+            self._init_error = "sentence-transformers package not installed in environment"
+        except Exception as exc:
+            self._init_error = f"Failed to load neural model '{self._model_name}': {exc}"
+
+    @property
+    def is_available(self) -> bool:
+        return self._model is not None
+
+    @property
+    def is_neural(self) -> bool:
+        return True
+
+    @property
+    def vector_technique(self) -> str:
+        return "neural_transformer"
+
+    @property
+    def provider_name(self) -> str:
+        return "local_neural"
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def status_reason(self) -> str:
+        if self._model is not None:
+            return "Local neural transformer operational"
+        return self._init_error or "Neural runtime unavailable"
+
+    def embed_text(self, text: str) -> list[float]:
+        if not self.is_available:
+            raise RuntimeError(f"LocalNeuralEmbeddingProvider is unavailable: {self.status_reason}")
+        if not text or not text.strip():
+            return [0.0] * self._dim
+        vec = self._model.encode(text, convert_to_numpy=True).tolist()
+        return [float(x) for x in vec]
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not self.is_available:
+            raise RuntimeError(f"LocalNeuralEmbeddingProvider is unavailable: {self.status_reason}")
+        if not texts:
+            return []
+        vecs = self._model.encode(texts, convert_to_numpy=True).tolist()
+        return [[float(x) for x in v] for v in vecs]
+
+
 class GeminiEmbeddingProvider(BaseEmbeddingProvider):
     """Google Gemini embedding provider using google-genai SDK."""
 
@@ -204,6 +303,14 @@ class GeminiEmbeddingProvider(BaseEmbeddingProvider):
     @property
     def is_available(self) -> bool:
         return bool(self._client and self._api_key)
+
+    @property
+    def is_neural(self) -> bool:
+        return True
+
+    @property
+    def vector_technique(self) -> str:
+        return "gemini_api_neural"
 
     @property
     def provider_name(self) -> str:
@@ -270,6 +377,14 @@ class OpenAIEmbeddingProvider(BaseEmbeddingProvider):
     @property
     def is_available(self) -> bool:
         return bool(self._client and self._api_key)
+
+    @property
+    def is_neural(self) -> bool:
+        return True
+
+    @property
+    def vector_technique(self) -> str:
+        return "openai_api_neural"
 
     @property
     def provider_name(self) -> str:
@@ -343,7 +458,16 @@ def get_embedding_provider(settings: Settings | None = None) -> BaseEmbeddingPro
         logger.info("OpenAI embedding not configured with valid key, using local fallback.")
         return LocalSemanticEmbeddingProvider()
 
-    if provider_choice in ("local", "auto"):
+    if provider_choice in ("local_neural", "neural"):
+        neural_prov = LocalNeuralEmbeddingProvider()
+        if neural_prov.is_available:
+            return neural_prov
+        logger.info(
+            f"Local neural provider unavailable ({neural_prov.status_reason}); falling back honestly to deterministic subword hash provider."
+        )
+        return LocalSemanticEmbeddingProvider()
+
+    if provider_choice in ("local", "auto", "hash", "subword_hash"):
         return LocalSemanticEmbeddingProvider()
 
     return LocalSemanticEmbeddingProvider()

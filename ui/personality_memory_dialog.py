@@ -829,17 +829,30 @@ class PersonalityMemoryDialog(QDialog):
             QMessageBox.critical(self, "Consolidation Error", f"Consolidation failed: {exc}")
 
     def _save_intelligence_settings(self) -> None:
-        """Save settings updates."""
+        """Save settings updates atomically to survive application restarts."""
         try:
-            from config import get_settings
+            from config import get_settings, save_env_settings
 
             s = get_settings()
-            s.persian_understanding_enabled = self._intel_persian_cb.isChecked()
+            persian_val = self._intel_persian_cb.isChecked()
+            s.persian_understanding_enabled = persian_val
             sel_text = self._intel_lang_combo.currentText().split()[0]
             s.response_language_policy = sel_text
             sel_mode = self._intel_reasoning_mode.currentText().split()[0]
             s.reasoning_mode = sel_mode
-            QMessageBox.information(self, "Saved", "Intelligence settings updated successfully.")
+
+            # Atomic persistence to environment configuration
+            save_env_settings(
+                {
+                    "PERSIAN_UNDERSTANDING_ENABLED": str(persian_val).lower(),
+                    "RESPONSE_LANGUAGE_POLICY": sel_text,
+                    "REASONING_MODE": sel_mode,
+                }
+            )
+
+            QMessageBox.information(
+                self, "Saved", "Intelligence settings updated and persisted successfully."
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Error", f"Failed to save settings: {exc}")
 

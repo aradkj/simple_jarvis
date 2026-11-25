@@ -64,6 +64,11 @@ class MultiStepProblemSolver:
         ctx = context or {}
         memories = retrieved_memories or []
 
+        if semantic_interp is None:
+            from core.persian.intent_analyzer import PersianIntentAnalyzer
+
+            semantic_interp = PersianIntentAnalyzer().interpret(goal)
+
         # 1. Understand the goal & Classify complexity
         complexity, reasoning_depth = self.classifier.classify(goal, semantic_interp, ctx)
 
@@ -102,7 +107,7 @@ class MultiStepProblemSolver:
         selected_id = selected.option_id if selected else "direct_response"
 
         # 8. Build execution plan steps
-        plan_steps = self._build_plan_steps(goal, selected, semantic_interp)
+        plan_steps = self._build_plan_steps(goal, selected, semantic_interp, context=ctx)
 
         # 9. Calibrate confidence
         conf_level, conf_score, conf_expl = self.calibrator.calibrate(
@@ -243,49 +248,304 @@ class MultiStepProblemSolver:
         goal: str,
         selected_option: DecisionOption | None,
         semantic_interp: SemanticInterpretation | None,
+        context: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """Construct structured plan steps."""
-        if not selected_option:
-            return [{"step": 1, "action": "respond_directly", "description": "Formulate response"}]
+        """Construct dynamic, task-specific plan steps with explicit prerequisites and verification criteria."""
+        ctx = context or {}
+        g_lower = goal.lower()
+        intent = semantic_interp.primary_intent if semantic_interp else None
+        intent_val = intent.value if hasattr(intent, "value") else str(intent or "")
+        target = (
+            (
+                (
+                    semantic_interp.target_entity
+                    or semantic_interp.active_file
+                    or semantic_interp.active_project
+                )
+                if semantic_interp
+                else None
+            )
+            or ctx.get("active_file")
+            or ctx.get("active_project")
+        )
 
-        if selected_option.option_id == "inspect_first_then_remediate":
+        is_actionable = any(
+            k in g_lower
+            for k in (
+                "پیاده‌سازی",
+                "پیاده سازی",
+                "تنظیم",
+                "ایجاد",
+                "افزودن",
+                "بررسی",
+                "تست",
+                "بکاپ",
+                "ریفکتور",
+                "پاکسازی",
+                "عیب‌یابی",
+                "عیب یابی",
+                "کوئری",
+                "کامیت",
+                "کانفیگ",
+                "داکر",
+                "اسکریپت",
+                "لاگ",
+                "سرویس",
+                "implement",
+                "create",
+                "setup",
+                "configure",
+                "test",
+                "clean",
+                "build",
+                "deploy",
+                "fix",
+            )
+        )
+
+        # 1. Direct conversational response (no tools)
+        if (
+            not selected_option or selected_option.option_id == "direct_conversation"
+        ) and not is_actionable:
             return [
                 {
                     "step": 1,
-                    "action": "inspect_target",
-                    "description": "Inspect project files and diagnostic telemetry",
+                    "action": "formulate_response",
+                    "description": f"Formulate direct, context-aware answer for: {goal}",
+                    "prerequisites": [],
+                    "verification_criteria": "Response provides accurate, coherent information.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": None,
+                }
+            ]
+
+        # 2. Technical Diagnosis / Debugging / Test Inspection
+        if (
+            intent_val in ("debugging", "technical_diagnosis", "project_investigation")
+            or (selected_option.option_id if selected_option else "")
+            == "inspect_first_then_remediate"
+            or any(
+                k in g_lower
+                for k in ("test", "bug", "error", "traceback", "fail", "خطا", "دیباگ", "تست")
+            )
+        ):
+            target_desc = f" ({target})" if target else ""
+            return [
+                {
+                    "step": 1,
+                    "action": "inspect_diagnostics",
+                    "description": f"Inspect repository telemetry, log files, and stack traces{target_desc}.",
+                    "prerequisites": ["Workspace directory accessible"],
+                    "verification_criteria": "Error traces and diagnostic symptoms identified.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "file_inspect",
                 },
                 {
                     "step": 2,
-                    "action": "execute_tests",
-                    "description": "Execute test suite to reproduce issue",
+                    "action": "reproduce_failure",
+                    "description": "Execute targeted tests or diagnostics to isolate the defect.",
+                    "prerequisites": ["Target diagnostic files inspected"],
+                    "verification_criteria": "Deterministic reproduction confirms failure boundaries.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "terminal_execute",
                 },
                 {
                     "step": 3,
-                    "action": "analyze_failures",
-                    "description": "Analyze failure traces and root causes",
+                    "action": "formulate_remediation",
+                    "description": "Analyze failure root causes and construct minimal targeted fix.",
+                    "prerequisites": ["Reproduction confirmed"],
+                    "verification_criteria": "Root cause identified and validated against constraints.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": None,
                 },
                 {
                     "step": 4,
                     "action": "verify_and_report",
-                    "description": "Verify state and produce concise status summary",
+                    "description": "Verify remediation via independent regression tests and state checks.",
+                    "prerequisites": ["Remediation applied"],
+                    "verification_criteria": "All unit and integration tests exit with code 0 (100% green).",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "terminal_execute",
                 },
             ]
 
+        # 3. File Operations (Mutation / Creation vs Read / Search)
+        is_file_op = intent_val == "file_operation" or any(
+            k in g_lower for k in ("file", "folder", "directory", "فایل", "پوشه", "دایرکتوری")
+        )
+        is_write_op = any(
+            k in g_lower
+            for k in (
+                "write",
+                "create",
+                "modify",
+                "edit",
+                "make",
+                "touch",
+                "ساخت",
+                "ایجاد",
+                "ویرایش",
+                "نوشتن",
+            )
+        )
+
+        if is_file_op and is_write_op:
+            target_name = target or "requested target"
+            return [
+                {
+                    "step": 1,
+                    "action": "validate_path_security",
+                    "description": f"Validate path authorization within workspace boundaries for '{target_name}'.",
+                    "prerequisites": ["Target path specified"],
+                    "verification_criteria": "Path is confirmed inside authorized workspace roots.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "path_security",
+                },
+                {
+                    "step": 2,
+                    "action": "inspect_pre_state",
+                    "description": f"Inspect existing file or directory state prior to modifying '{target_name}'.",
+                    "prerequisites": ["Path security validated"],
+                    "verification_criteria": "Pre-execution state recorded and backups prepared if needed.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "file_inspect",
+                },
+                {
+                    "step": 3,
+                    "action": "execute_modification",
+                    "description": f"Apply bounded file modification or creation for '{target_name}'.",
+                    "prerequisites": ["Pre-state verified", "Authorization confirmed"],
+                    "verification_criteria": "Tool execution returns success status with exit code 0.",
+                    "risk_level": RiskLevel.REVERSIBLE_MODIFICATION.value,
+                    "status": "pending",
+                    "tool_hint": "file_write",
+                },
+                {
+                    "step": 4,
+                    "action": "verify_file_outcome",
+                    "description": f"Independently verify target '{target_name}' exists on disk with expected content.",
+                    "prerequisites": ["Modification step completed"],
+                    "verification_criteria": "Target exists, size > 0, and content matches expected modification.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "file_inspect",
+                },
+            ]
+
+        if is_file_op and not is_write_op:
+            target_name = target or "project files"
+            return [
+                {
+                    "step": 1,
+                    "action": "search_project_files",
+                    "description": f"Search and locate target files matching '{target_name}'.",
+                    "prerequisites": ["Authorized workspace path accessible"],
+                    "verification_criteria": "Matching files identified within authorized directory.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "file_search",
+                },
+                {
+                    "step": 2,
+                    "action": "inspect_target_content",
+                    "description": f"Inspect file content and metadata for '{target_name}'.",
+                    "prerequisites": ["Target file located"],
+                    "verification_criteria": "File successfully read and parsed without error.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "file_inspect",
+                },
+                {
+                    "step": 3,
+                    "action": "synthesize_findings",
+                    "description": f"Synthesize inspected findings to answer inquiry regarding '{target_name}'.",
+                    "prerequisites": ["File content parsed"],
+                    "verification_criteria": "Response accurately reflects verified file contents.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": None,
+                },
+            ]
+
+        # 4. Application Control
+        if intent_val == "application_control" or any(
+            k in g_lower for k in ("launch", "open", "close", "minimize", "اجرا", "باز کن", "ببند")
+        ):
+            app_name = target or "target application"
+            return [
+                {
+                    "step": 1,
+                    "action": "inspect_process_state",
+                    "description": f"Inspect active Windows processes and window handles for '{app_name}'.",
+                    "prerequisites": ["System process querying available"],
+                    "verification_criteria": "Current process running state determined.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "windows_app_read",
+                },
+                {
+                    "step": 2,
+                    "action": "dispatch_app_control",
+                    "description": f"Dispatch bounded application action for '{app_name}'.",
+                    "prerequisites": ["Process state determined", "Application in allowlist"],
+                    "verification_criteria": "System action dispatched cleanly.",
+                    "risk_level": RiskLevel.REVERSIBLE_MODIFICATION.value,
+                    "status": "pending",
+                    "tool_hint": "windows_app_launch",
+                },
+                {
+                    "step": 3,
+                    "action": "verify_window_state",
+                    "description": f"Independently verify process alive and window visibility for '{app_name}'.",
+                    "prerequisites": ["Control action dispatched"],
+                    "verification_criteria": "Process confirmed running or terminated as requested.",
+                    "risk_level": RiskLevel.READ_ONLY.value,
+                    "status": "pending",
+                    "tool_hint": "windows_window_read",
+                },
+            ]
+
+        # 5. Generic Structured Problem-Solving
         return [
             {
                 "step": 1,
                 "action": "validate_prerequisites",
-                "description": "Validate authorization and parameters",
+                "description": f"Validate execution prerequisites, authorization, and constraints for: {goal}",
+                "prerequisites": ["User instruction received"],
+                "verification_criteria": "All operational constraints satisfied.",
+                "risk_level": RiskLevel.READ_ONLY.value,
+                "status": "pending",
+                "tool_hint": None,
             },
             {
                 "step": 2,
-                "action": "execute_action",
-                "description": f"Execute {selected_option.title}",
+                "action": "execute_bounded_action",
+                "description": f"Execute authorized action for '{selected_option.title if selected_option else goal}'.",
+                "prerequisites": ["Prerequisites validated"],
+                "verification_criteria": "Action completed within security boundaries.",
+                "risk_level": (
+                    selected_option.risk_level.value
+                    if selected_option
+                    else RiskLevel.READ_ONLY.value
+                ),
+                "status": "pending",
+                "tool_hint": None,
             },
             {
                 "step": 3,
-                "action": "verify_result",
-                "description": "Independently verify actual outcome",
+                "action": "verify_independent_outcome",
+                "description": "Independently inspect system state and verify outcome against ground truth.",
+                "prerequisites": ["Action executed"],
+                "verification_criteria": "Ground truth verification passes.",
+                "risk_level": RiskLevel.READ_ONLY.value,
+                "status": "pending",
+                "tool_hint": None,
             },
         ]

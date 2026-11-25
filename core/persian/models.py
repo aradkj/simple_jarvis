@@ -201,6 +201,7 @@ class PersianUnderstandingResult(BaseModel):
             relevant_objects=self.relevant_objects,
             relevant_locations=self.relevant_locations,
             constraints=self.operational_constraints,
+            prohibited_actions=self.prohibited_actions,
             preconditions=[],
             desired_outcome=self.desired_outcome,
             temporal_references=self.temporal_references,
@@ -236,6 +237,7 @@ class SemanticInterpretation(BaseModel):
     relevant_objects: list[str] = Field(default_factory=list)
     relevant_locations: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    prohibited_actions: list[str] = Field(default_factory=list)
     preconditions: list[str] = Field(default_factory=list)
     desired_outcome: str = ""
     temporal_references: list[str] = Field(default_factory=list)

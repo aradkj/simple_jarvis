@@ -22,6 +22,7 @@ from core.permissions import (
     PermissionCategory,
     StrictDefaultDenyPermissionManager,
 )
+from core.persian.models import TaskComplexity
 from core.personality import JarvisPersonalityEngine
 from core.planner import AgentPlanner, Plan
 from core.reasoning import MultiStepProblemSolver
@@ -288,6 +289,7 @@ class JARVISAgent:
             approval_manager=self.approval_manager,
             settings=self.settings,
             event_bus=self.event_bus,
+            decision_engine=self.decision_engine,
         )
 
         # Phase 9 Voice Intelligence Pipeline
@@ -779,6 +781,8 @@ class JARVISAgent:
         active_session = session_id or self._active_session_id
         ctx = context or self._current_context
         ctx.session_id = active_session
+        if not hasattr(ctx, "agent_mode") or getattr(ctx, "agent_mode", None) is None:
+            ctx.agent_mode = getattr(self.settings, "agent_mode", "balanced")
 
         # 1. State: ANALYZING (Ensure clean state transition from current state)
         if self.state_machine.current_state != AgentState.IDLE:
@@ -843,6 +847,11 @@ class JARVISAgent:
                 orchestrated_task.metadata["decision_record"] = dec_rec.model_dump()
                 ctx.metadata["decision_record"] = dec_rec
                 ctx.metadata["calibrated_confidence"] = reasoning_res.get("confidence_score", 1.0)
+            if reasoning_res.get("plan_steps"):
+                orchestrated_task.metadata["reasoning_plan_steps"] = reasoning_res["plan_steps"]
+                ctx.metadata["reasoning_plan_steps"] = reasoning_res["plan_steps"]
+            if reasoning_res.get("complexity"):
+                ctx.metadata["task_complexity"] = reasoning_res["complexity"]
 
             # If ambiguity materially impacts correctness and clarification is required:
             if (
@@ -965,6 +974,11 @@ class JARVISAgent:
 
         # 2. Check if planning is required
         needs_plan = self.planner.should_plan(resolved_goal)
+        if not needs_plan and ctx.metadata.get("task_complexity") in (
+            TaskComplexity.MULTI_STEP_PLANNING,
+            TaskComplexity.TECHNICAL_DIAGNOSIS,
+        ):
+            needs_plan = True
         available_tool_defs = [
             t.get_definition()
             for t in self.tool_registry.list_tools()
@@ -1103,7 +1117,7 @@ class JARVISAgent:
             # DEFAULT_ENGLISH: responds in British English
             target_lang = "en"
 
-        if not outcome.final_response and outcome.status == "completed":
+        if not outcome.final_response:
             outcome.final_response = JarvisPersonalityEngine.format_truthful_response(
                 outcome, language=target_lang
             )

@@ -234,10 +234,10 @@ for i in range(20):
     )
 
 # ==============================================================================
-# Category 3: Confidence Calibration (25 cases)
+# Category 3: Confidence Calibration & Evidence Verification (85 cases)
 # ==============================================================================
 CONFIDENCE_CASES = [
-    # Verified by tool output
+    # Verified by tool output (real execution proof)
     (True, 0.95, 0, False, False, False, ConfidenceLevel.VERIFIED),
     (True, 0.80, 0, False, False, False, ConfidenceLevel.VERIFIED),
     (False, 0.95, 0, False, False, True, ConfidenceLevel.VERIFIED),  # User confirmed
@@ -262,18 +262,66 @@ CONFIDENCE_CASES = [
     (False, 0.70, 1, False, False, False, ConfidenceLevel.UNCERTAIN),
     (False, 0.20, 0, False, False, False, ConfidenceLevel.UNCERTAIN),
 ]
-for _k in range(5):
-    CONFIDENCE_CASES.append(
-        (
-            False,
-            0.05,
-            2,
-            False,
-            True,
-            False,
-            ConfidenceLevel.UNCERTAIN,  # Contradiction detected -> Uncertain
+
+# Additional 65 systematically generated scenarios bringing confidence suite to 85 verified cases
+# Additional Tool Verified cases (10 cases)
+for _v in [0.72, 0.77, 0.81, 0.84, 0.87, 0.91, 0.93, 0.96, 0.98, 0.99]:
+    CONFIDENCE_CASES.append((True, _v, 0, False, False, False, ConfidenceLevel.VERIFIED))
+
+# Additional User Confirmed cases (5 cases)
+for _u in [0.71, 0.76, 0.82, 0.88, 0.94]:
+    CONFIDENCE_CASES.append((False, _u, 0, False, False, True, ConfidenceLevel.VERIFIED))
+
+# Additional Strongly Supported cases (15 cases)
+for _s in [
+    0.71,
+    0.73,
+    0.75,
+    0.78,
+    0.79,
+    0.83,
+    0.86,
+    0.87,
+    0.89,
+    0.91,
+    0.93,
+    0.94,
+    0.96,
+    0.97,
+    0.99,
+]:
+    CONFIDENCE_CASES.append((False, _s, 0, False, False, False, ConfidenceLevel.STRONGLY_SUPPORTED))
+
+# Additional Probable cases (15 cases)
+for _p in [
+    0.51,
+    0.52,
+    0.53,
+    0.54,
+    0.56,
+    0.57,
+    0.59,
+    0.61,
+    0.62,
+    0.63,
+    0.64,
+    0.66,
+    0.67,
+    0.68,
+    0.69,
+]:
+    CONFIDENCE_CASES.append((False, _p, 0, False, False, False, ConfidenceLevel.PROBABLE))
+
+# Additional Uncertain due to ambiguities (15 cases)
+for _a_cnt in [1, 2, 3]:
+    for _a_score in [0.30, 0.40, 0.50, 0.60, 0.70]:
+        CONFIDENCE_CASES.append(
+            (False, _a_score, _a_cnt, False, False, False, ConfidenceLevel.UNCERTAIN)
         )
-    )
+
+# Additional Uncertain due to contradiction (5 cases)
+for _c_score in [0.65, 0.75, 0.85, 0.90, 0.95]:
+    CONFIDENCE_CASES.append((False, _c_score, 0, False, True, False, ConfidenceLevel.UNCERTAIN))
 
 # ==============================================================================
 # Category 4: Contradiction Detection (15 cases)

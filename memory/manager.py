@@ -329,6 +329,12 @@ class MemoryManager:
             "embedding_dimension": self.embedding_provider.dimension
             if self.embedding_provider
             else 0,
+            "is_neural": getattr(self.embedding_provider, "is_neural", False)
+            if self.embedding_provider
+            else False,
+            "vector_technique": getattr(self.embedding_provider, "vector_technique", "none")
+            if self.embedding_provider
+            else "none",
             "vector_search_operational": retrieval_status.get("semantic_vector_active", False),
         }
 
