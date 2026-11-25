@@ -592,11 +592,20 @@ class AgentPlanner:
         if prohibited_actions:
             constraint_rules += f"\n6. PROHIBITED ACTIONS: The user explicitly prohibited: {', '.join(prohibited_actions)}."
 
+        reasoning_steps = context.metadata.get("reasoning_plan_steps")
+        reason_hint = ""
+        if reasoning_steps:
+            reason_hint = (
+                f"\nPre-reasoned task decomposition steps to follow:\n"
+                f"{json.dumps(reasoning_steps, ensure_ascii=False, indent=2)}\n\n"
+            )
+
         planning_prompt = (
             f"You are JARVIS's task decomposition planner. Analyze the user's goal and generate a structured JSON execution plan.\n"
             f"{mem_block}"
             f"User Goal: {goal}\n"
             f"{tools_desc}\n\n"
+            f"{reason_hint}"
             f"You MUST respond ONLY with a valid JSON object matching this exact structure:\n"
             f"{{\n"
             f'  "goal": "{goal}",\n'
@@ -665,7 +674,7 @@ class AgentPlanner:
                     f"Structured plan generation via model failed: {exc}. Falling back to default deterministic decomposition."
                 )
                 data = self._build_fallback_plan_dict(
-                    goal, available_tools, session_id=context.session_id
+                    goal, available_tools, session_id=context.session_id, context=context
                 )
 
         plan = self._build_and_validate_plan(data, goal, context)
@@ -3176,6 +3185,7 @@ class AgentPlanner:
         goal: str,
         available_tools: list[ToolDefinition] | None = None,
         session_id: str | None = None,
+        context: ExecutionContext | None = None,
     ) -> dict[str, Any]:
         """Produce safe deterministic fallback plan when LLM structured generation fails."""
         steps: list[dict[str, Any]] = [
@@ -3265,6 +3275,29 @@ class AgentPlanner:
                     "dependencies": [],
                 }
             )
+        elif context and (r_steps := context.metadata.get("reasoning_plan_steps")):
+            for s in r_steps:
+                tool_hint = s.get("tool_hint")
+                if tool_hint and tool_hint in tool_names:
+                    steps.append(
+                        {
+                            "description": s.get("description", "Execute planned action"),
+                            "step_type": "tool_call",
+                            "tool_name": tool_hint,
+                            "parameters": s.get("parameters") or {},
+                            "dependencies": [],
+                        }
+                    )
+                else:
+                    steps.append(
+                        {
+                            "description": s.get("description", "Reasoning step"),
+                            "step_type": "thought",
+                            "tool_name": None,
+                            "parameters": {},
+                            "dependencies": [],
+                        }
+                    )
 
         steps.append(
             {

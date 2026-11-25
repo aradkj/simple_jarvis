@@ -38,9 +38,10 @@ class AlternativeEvaluator:
 
     def __init__(self, weights: dict[str, float] | None = None) -> None:
         raw_weights = weights or self.DEFAULT_WEIGHTS
-        total = sum(raw_weights.values())
+        valid_weights = {k: max(0.0, float(v)) for k, v in raw_weights.items()}
+        total = sum(valid_weights.values())
         if total > 0:
-            self.weights = {k: v / total for k, v in raw_weights.items()}
+            self.weights = {k: v / total for k, v in valid_weights.items()}
         else:
             self.weights = self.DEFAULT_WEIGHTS
 
@@ -91,20 +92,30 @@ class AlternativeEvaluator:
                 "execution_time": float(raw_scores.get("execution_time", 0.8)),
             }
 
-            # Constraint penalty
+            # Constraint and hard safety enforcement
             reasons: list[str] = []
+            violates_hard_constraint = False
             for c in active_constraints:
                 if "read_only" in c and risk != RiskLevel.READ_ONLY:
-                    scores["security"] *= 0.2
-                    scores["correctness"] *= 0.5
-                    reasons.append("Violates read-only operational constraint")
+                    violates_hard_constraint = True
+                    scores["security"] = 0.0
+                    scores["correctness"] = 0.0
+                    reasons.append("Violates hard constraint: read-only operation required")
                 if "preserve" in c and risk in (
                     RiskLevel.DESTRUCTIVE_OPERATION,
                     RiskLevel.IRREVERSIBLE_OPERATION,
                 ):
-                    scores["security"] *= 0.1
-                    scores["reversibility"] *= 0.1
-                    reasons.append("Violates data preservation constraint")
+                    violates_hard_constraint = True
+                    scores["security"] = 0.0
+                    scores["reversibility"] = 0.0
+                    reasons.append("Violates hard constraint: data preservation required")
+                if "no_deletion" in c and (
+                    risk in (RiskLevel.DESTRUCTIVE_OPERATION, RiskLevel.IRREVERSIBLE_OPERATION)
+                    or "delete" in description.lower()
+                    or "حذف" in description.lower()
+                ):
+                    violates_hard_constraint = True
+                    reasons.append("Violates hard constraint: deletion prohibited")
 
             # Preference alignment
             for p in user_prefs:
@@ -114,6 +125,8 @@ class AlternativeEvaluator:
 
             # Weighted aggregate score across normalized weights
             total_score = sum(scores.get(dim, 0.5) * weight for dim, weight in self.weights.items())
+            if violates_hard_constraint:
+                total_score = 0.0
             total_score = round(min(1.0, max(0.0, total_score)), 4)
 
             evaluated.append(
@@ -129,9 +142,20 @@ class AlternativeEvaluator:
                 )
             )
 
-        # Sort descending by score
-        evaluated.sort(key=lambda o: o.score, reverse=True)
-        if evaluated:
+        # Sort descending deterministically: valid candidates first, then score, then option_id
+        evaluated.sort(
+            key=lambda o: (
+                not any("Violates hard constraint" in r for r in o.reasons),
+                o.score,
+                o.option_id,
+            ),
+            reverse=True,
+        )
+        if (
+            evaluated
+            and evaluated[0].score > 0.0
+            and not any("Violates hard constraint" in r for r in evaluated[0].reasons)
+        ):
             # Mark top scoring candidate as recommended
             evaluated[0] = DecisionOption(
                 option_id=evaluated[0].option_id,

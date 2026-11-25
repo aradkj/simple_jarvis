@@ -258,8 +258,19 @@ class SemanticInterpretation(BaseModel):
     response_language: str = "en"
     spoken_acknowledgment: str | None = None
 
+    @property
+    def prohibitions(self) -> list[str]:
+        """Convenience property for prohibited actions."""
+        return self.prohibited_actions
+
     def to_understanding_result(self) -> PersianUnderstandingResult:
         """Convert into backward-compatible PersianUnderstandingResult."""
+        combined_prohibitions = list(
+            dict.fromkeys(
+                self.prohibited_actions
+                + [c for c in self.constraints if c.startswith("no_") or "دست نزن" in c]
+            )
+        )
         return PersianUnderstandingResult(
             raw_input=self.raw_input,
             normalized_text=self.normalized_text,
@@ -274,9 +285,7 @@ class SemanticInterpretation(BaseModel):
             requires_clarification=self.requires_clarification,
             clarification_prompt=self.clarification_prompt,
             operational_constraints=self.constraints,
-            prohibited_actions=[
-                c for c in self.constraints if c.startswith("no_") or "دست نزن" in c
-            ],
+            prohibited_actions=combined_prohibitions,
             is_read_only=self.is_read_only,
             active_project=self.active_project,
             active_file=self.active_file,

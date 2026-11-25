@@ -495,6 +495,20 @@ class AgentExecutor:
                     tool_metadata=tool_meta,
                 )
             )
+            if not _allowed:
+                logger.warning(
+                    f"Decision Gateway blocked execution of '{step.tool_name}': {rationale}"
+                )
+                step.status = StepStatus.FAILED
+                step.error = f"Blocked by Decision Gateway: {rationale}"
+                if self.event_bus:
+                    self.event_bus.publish(
+                        AgentEvent(
+                            event_type=AgentEventType.STEP_FAILED,
+                            payload={"step_id": step.step_id, "error": step.error},
+                        )
+                    )
+                return "replan_needed"
             risk = map_to_proposal_risk(p_risk)
             tool_def = tool.get_definition() if hasattr(tool, "get_definition") else None
             req_approval = dec_req_approval or (tool_def.requires_approval if tool_def else False)

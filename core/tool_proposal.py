@@ -66,8 +66,10 @@ class ToolProposal:
             ProposalStatus.REJECTED,
             ProposalStatus.CANCELLED,
             ProposalStatus.EXPIRED,
+            ProposalStatus.EXECUTED,
+            ProposalStatus.FAILED,
         ):
-            raise ValueError(f"Cannot approve proposal in status '{self.status.value}'")
+            raise ValueError(f"Cannot approve proposal in terminal status '{self.status.value}'")
         self.status = ProposalStatus.APPROVED
         self.approved_at = datetime.now(UTC)
         self.approved_signature = self.compute_signature()

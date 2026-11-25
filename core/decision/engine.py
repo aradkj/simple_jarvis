@@ -295,7 +295,9 @@ class RiskClassifier:
                 return RiskLevel.READ_ONLY
 
         # 2. Sensitive credential & key access check
-        if self._has_sensitive_credentials(params):
+        if any(k in t_lower for k in self.SENSITIVE_KEYWORDS) or self._has_sensitive_credentials(
+            params
+        ):
             return RiskLevel.SENSITIVE_DATA_ACCESS
 
         # 3. Destructive operations check
@@ -511,6 +513,59 @@ class DecisionEngine:
 
         auto_approve = getattr(context, "auto_approve", False) if context else False
         agent_mode = getattr(context, "agent_mode", "balanced") if context else "balanced"
+
+        # 0. Active Context Policy & Prohibition Verification
+        if context:
+            ctx_meta = getattr(context, "metadata", {}) or {}
+            is_read_only = bool(
+                getattr(context, "read_only", False) or ctx_meta.get("read_only", False)
+            )
+            if is_read_only and risk_level != RiskLevel.READ_ONLY:
+                return (
+                    False,
+                    risk_level,
+                    False,
+                    f"Action '{tool_name}' blocked: Execution context is restricted to read-only operations.",
+                )
+
+            prohibitions = ctx_meta.get("prohibited_actions", [])
+            # Priority 1: Check specific targeted resource prohibitions first
+            for p in prohibitions:
+                p_lower = str(p).lower().strip()
+                if p_lower.startswith("do_not_touch_"):
+                    target_token = p_lower.replace("do_not_touch_", "").strip()
+                    p_str_val = str(params or {}).lower()
+                    if target_token in p_str_val or target_token in (tool_name or "").lower():
+                        return (
+                            False,
+                            risk_level,
+                            False,
+                            f"Action '{tool_name}' blocked: Access to '{target_token}' is explicitly prohibited.",
+                        )
+
+            # Priority 2: Check general action and modification prohibitions
+            for p in prohibitions:
+                p_lower = str(p).lower().strip()
+                if p_lower in ("no_unauthorized_deletion", "no_deletion") and risk_level in (
+                    RiskLevel.DESTRUCTIVE_OPERATION,
+                    RiskLevel.IRREVERSIBLE_OPERATION,
+                ):
+                    return (
+                        False,
+                        risk_level,
+                        False,
+                        f"Action '{tool_name}' blocked by prohibition policy: {p}",
+                    )
+                if (
+                    p_lower in ("no_modifications", "read_only")
+                    and risk_level != RiskLevel.READ_ONLY
+                ):
+                    return (
+                        False,
+                        risk_level,
+                        False,
+                        f"Action '{tool_name}' blocked by prohibition policy: {p}",
+                    )
 
         cat = None
         if tool_instance and hasattr(tool_instance, "category"):

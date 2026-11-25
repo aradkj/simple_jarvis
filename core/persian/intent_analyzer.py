@@ -283,7 +283,7 @@ class PersianIntentAnalyzer:
             if pattern.search(lower):
                 return PersianIntentType.CODE_EXPLANATION, False, False, None
 
-        # 13. Application Control
+        # 13. Application & Technical Service Control
         if any(
             k in lower
             for k in (
@@ -296,8 +296,32 @@ class PersianIntentAnalyzer:
                 "لود کن",
                 "open",
                 "launch",
+                "ران کن",
+                "ریستارت کن",
+                "ریاستارت کن",
+                "استارت کن",
+                "استاپ کن",
+                "restart",
+                "run",
             )
         ):
+            if any(
+                w in lower
+                for w in (
+                    "api",
+                    "کانتینر",
+                    "سرویس",
+                    "container",
+                    "server",
+                    "سرور",
+                    "migration",
+                    "مایگریشن",
+                    "برنامه",
+                    "اپلیکیشن",
+                    "app",
+                )
+            ):
+                return PersianIntentType.APPLICATION_CONTROL, False, False, None
             for pattern in self.APP_CONTROL_PATTERNS:
                 if pattern.search(lower):
                     return PersianIntentType.APPLICATION_CONTROL, False, False, None
@@ -400,11 +424,11 @@ class PersianIntentAnalyzer:
         preconditions: list[str] = []
         lower = text.lower()
 
-        # Conditional markers: اگر, اگه, در صورتی که, چنانچه, به شرطی که, if, in case
+        # Conditional markers: اگر, اگه, در صورتی که, چنانچه, به شرطی که, فقط در صورتی که, if, in case
         cond_patterns = [
             (
                 re.compile(
-                    r"(?:اگر|اگه|چنانچه|در\s*صورتی\s*که)\s+(.+?)\s+(?:بود|شد|نبود|نشد|پاس\s*شد|خطا\s*داد|موجود\s*نبود|باز\s*بود|بسته\s*بود)",
+                    r"(?:اگر|اگه|چنانچه|فقط\s*در\s*صورتی\s*که|در\s*صورتی\s*که|به\s*شرطی\s*که|مشروط\s*بر\s*(?:اینکه)?)\s+(.+?)\s+(?:بود|شد|شدن|شدند|نبود|نشد|داشت|نداشت|پاس\s*شد|پاس\s*شدن|پاس\s*شدند|خطا\s*داد|موجود\s*نبود|موجود\s*بود|باز\s*بود|بسته\s*بود)",
                     re.IGNORECASE,
                 ),
                 "condition",
@@ -424,13 +448,26 @@ class PersianIntentAnalyzer:
                 if clean_cond:
                     preconditions.append(clean_cond)
 
-        if "اگر خطایی" in lower or "در صورت خطا" in lower or "if error" in lower:
+        if (
+            "اگر خطایی" in lower
+            or "در صورت خطا" in lower
+            or "if error" in lower
+            or "اگه خطا داشت" in lower
+            or "اگر خطا داشت" in lower
+        ):
             preconditions.append("on_error_detected")
         if "اگر وجود نداشت" in lower or "در صورت عدم وجود" in lower or "if not exists" in lower:
             preconditions.append("target_does_not_exist")
+        if "فایل وجود داشت" in lower or "موجود بود" in lower:
+            preconditions.append("target_exists")
         if "اگر باز بود" in lower or "در صورتی که باز است" in lower:
             preconditions.append("target_is_open")
-        if "اگر تست‌ها پاس شدند" in lower or "در صورت موفقیت تست‌ها" in lower:
+        if (
+            "اگر تست‌ها پاس شدند" in lower
+            or "در صورت موفقیت تست‌ها" in lower
+            or "تستها موفق شدن" in lower
+            or "تست‌ها موفق شدن" in lower
+        ):
             preconditions.append("tests_pass")
 
         return list(dict.fromkeys(preconditions))
@@ -504,6 +541,58 @@ class PersianIntentAnalyzer:
         ):
             constraints.append("maintain_stability")
 
+        # Strict explicit prohibitions
+        if any(
+            k in lower
+            for k in (
+                "اجازه نداری",
+                "حق نداری",
+                "مجاز نیستی",
+                "به هیچ وجه",
+                "به هیچ عنوان",
+                "تحت هیچ شرایطی",
+                "نباید",
+                "ممنوع است",
+            )
+        ):
+            constraints.append("prohibition_active")
+            prohibitions.append("strictly_forbidden")
+            if any(k in lower for k in ("حذف", "پاک", "دیلیت", "remove", "delete")):
+                constraints.append("preserve_existing_data")
+                prohibitions.append("no_unauthorized_deletion")
+            if any(k in lower for k in ("تغییر", "ویرایش", "عوض", "دستکاری", "دست")):
+                constraints.append("read_only")
+                prohibitions.append("no_modifications")
+
+        # Command and execution negation
+        if any(
+            k in lower
+            for k in (
+                "اجرا نکن",
+                "ران نکن",
+                "دستور رو اجرا نکن",
+                "دستور را اجرا نکن",
+                "دستور اجرا نشود",
+                "دستور را اجرا ننمایید",
+            )
+        ):
+            prohibitions.append("no_execution")
+            constraints.append("execution_prohibited")
+
+        # Confirmation before transmission
+        if any(k in lower for k in ("بدون تایید", "بدون تأیید", "بدون اجازه")):
+            constraints.append("requires_user_confirmation")
+            if any(w in lower for w in ("ارسال", "بفرست", "فرستادن", "send", "transmit")):
+                prohibitions.append("no_unauthorized_transmission")
+
+        # Scope constraint
+        m_scope = re.search(
+            r"فقط\s*(?:داخل|در)\s*(.+?)\s*(?:کار\s*کن|انجام\s*بده|اعمال\s*کن)", lower
+        )
+        if m_scope:
+            scope_target = m_scope.group(1).strip()
+            constraints.append(f"scoped_to_{scope_target}")
+
         # Specific prohibited targets and negative verbs
         m1 = re.findall(r"دست\s*به\s+(.+?)\s*نزن", lower)
         m2 = re.findall(
@@ -511,15 +600,22 @@ class PersianIntentAnalyzer:
             lower,
         )
         m3 = re.findall(
-            r"([a-zA-Z0-9_\-\.\u200c]+|[آ-ی\s\u200c]+?)\s*(?:رو|را)?\s*(?:پاک\s*نکن|حذف\s*نکن|دیلیت\s*نکن|تغییر\s*نده|دستکاری\s*نکن|عوض\s*نکن)",
+            r"([a-zA-Z0-9_\-\.\u200c]+|[آ-ی\u200c]+?)\s*(?:رو|را)?\s*(?:پاک\s*نکن|حذف\s*نکن|دیلیت\s*نکن|تغییر\s*نده|دستکاری\s*نکن|عوض\s*نکن|reset\s*نکن|ریست\s*نکن|اجرا\s*نکن)",
             lower,
         )
-        for target in m1 + m2 + m3:
+        m_subj = re.findall(
+            r"(?:اجازه\s*نداری|حق\s*نداری|نباید|به\s*هیچ\s*وجه\s*نباید)\s+(.+?)\s*(?:رو|را)?\s*(?:حذف\s*کنی|پاک\s*کنی|دیلیت\s*کنی|تغییر\s*بدی|دست\s*بزنی|دستکاری\s*کنی|اجرا\s*کنی)",
+            lower,
+        )
+        for target in m1 + m2 + m3 + m_subj:
             target_clean = target.strip()
             if target_clean and target_clean not in ("هیچی", "چیزی", "این", "آن", "اون"):
                 prohibitions.append(f"do_not_touch_{target_clean}")
+                if any(w in lower for w in ("حذف", "پاک", "دیلیت", "reset", "ریست")):
+                    prohibitions.append("no_unauthorized_deletion")
+                    constraints.append("preserve_existing_data")
 
-        return constraints, list(dict.fromkeys(prohibitions))
+        return list(dict.fromkeys(constraints)), list(dict.fromkeys(prohibitions))
 
     def detect_ambiguities(
         self,
