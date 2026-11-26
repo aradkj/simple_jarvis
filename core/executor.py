@@ -403,6 +403,22 @@ class AgentExecutor:
             step.error = "Cancelled by user"
             return "cancelled"
 
+        # Check prerequisites / dependencies
+        if step.dependencies:
+            completed_ids = plan.get_completed_step_ids()
+            unsatisfied = [dep for dep in step.dependencies if dep not in completed_ids]
+            if unsatisfied:
+                step.status = StepStatus.FAILED
+                step.error = f"Prerequisite dependencies not satisfied: {unsatisfied}"
+                if self.event_bus:
+                    self.event_bus.publish(
+                        AgentEvent(
+                            event_type=AgentEventType.STEP_FAILED,
+                            payload={"step_id": step.step_id, "error": step.error},
+                        )
+                    )
+                return "replan_needed"
+
         # Step Type 1: THOUGHT or INFORMATION (Analytical reasoning)
         if step.step_type in (StepType.THOUGHT, StepType.INFORMATION, StepType.REPLAN):
             step.status = StepStatus.COMPLETED
@@ -516,14 +532,18 @@ class AgentExecutor:
                 risk = RiskLevel.HIGH
                 req_approval = True
 
-            proposal = ToolProposal(
-                session_id=context.session_id,
-                tool_name=step.tool_name,
-                arguments=proposal_args,
-                risk_level=risk,
-                requires_approval=req_approval,
-                rationale=step.description or rationale,
-            )
+            pending = getattr(step, "_pending_proposal", None)
+            if pending is not None and isinstance(pending, ToolProposal):
+                proposal = pending
+            else:
+                proposal = ToolProposal(
+                    session_id=context.session_id,
+                    tool_name=step.tool_name,
+                    arguments=proposal_args,
+                    risk_level=risk,
+                    requires_approval=req_approval,
+                    rationale=step.description or rationale,
+                )
             step.tool_proposal_id = proposal.proposal_id
 
             if self.event_bus:
@@ -633,6 +653,102 @@ class AgentExecutor:
                         AgentState.EXECUTING, reason="Proposal approved by user"
                     )
 
+            # Immediate Pre-Execution Verification & Single-Use Consumption Lock
+            if needs_user_confirmation or proposal.status == ProposalStatus.APPROVED:
+                # 1. Session binding check
+                if (
+                    context.session_id
+                    and proposal.session_id
+                    and context.session_id != proposal.session_id
+                ):
+                    proposal.mark_failed(
+                        "Execution session does not match approved proposal session"
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = "Execution session does not match approved proposal session"
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            AgentEvent(
+                                event_type=AgentEventType.STEP_FAILED,
+                                payload={"step_id": step.step_id, "error": step.error},
+                            )
+                        )
+                    return "replan_needed"
+
+                # 2. Tool name binding check
+                if step.tool_name != proposal.tool_name:
+                    proposal.mark_failed(
+                        "Execution tool name does not match approved proposal tool name"
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = "Execution tool name does not match approved proposal tool name"
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            AgentEvent(
+                                event_type=AgentEventType.STEP_FAILED,
+                                payload={"step_id": step.step_id, "error": step.error},
+                            )
+                        )
+                    return "replan_needed"
+
+                # 3. Parameter match check (excluding internal transport marker _proposal_id)
+                clean_step_params = {
+                    k: v for k, v in step.parameters.items() if k != "_proposal_id"
+                }
+                clean_prop_args = {
+                    k: v for k, v in proposal.arguments.items() if k != "_proposal_id"
+                }
+                if clean_step_params != clean_prop_args:
+                    proposal.mark_failed(
+                        "Proposal approval signature verification failed or parameters tampered"
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = (
+                        "Proposal approval signature verification failed or parameters tampered"
+                    )
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            AgentEvent(
+                                event_type=AgentEventType.STEP_FAILED,
+                                payload={"step_id": step.step_id, "error": step.error},
+                            )
+                        )
+                    return "replan_needed"
+
+                # 4. Cryptographic HMAC and TTL verification
+                if not proposal.is_valid_approval():
+                    proposal.mark_failed(
+                        "Proposal approval signature verification failed or parameters tampered"
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = (
+                        "Proposal approval signature verification failed or parameters tampered"
+                    )
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            AgentEvent(
+                                event_type=AgentEventType.STEP_FAILED,
+                                payload={"step_id": step.step_id, "error": step.error},
+                            )
+                        )
+                    return "replan_needed"
+
+                # 5. Atomic single-use consumption lock (APPROVED -> EXECUTING)
+                if not proposal.consume_for_execution():
+                    proposal.mark_failed(
+                        "Proposal authorization could not be consumed (possible replay or concurrency)"
+                    )
+                    step.status = StepStatus.FAILED
+                    step.error = "Proposal authorization could not be consumed (possible replay or concurrency)"
+                    if self.event_bus:
+                        self.event_bus.publish(
+                            AgentEvent(
+                                event_type=AgentEventType.STEP_FAILED,
+                                payload={"step_id": step.step_id, "error": step.error},
+                            )
+                        )
+                    return "replan_needed"
+
             # Execute tool safely via registry, injecting proposal_id for permission verification
             exec_params = dict(step.parameters)
             exec_params["_proposal_id"] = proposal.proposal_id
@@ -642,13 +758,34 @@ class AgentExecutor:
                 "browser_click_element",
                 "browser_fill_field",
             ):
-                exec_params["confirmed"] = proposal.status == ProposalStatus.APPROVED
+                exec_params["confirmed"] = proposal.status in (
+                    ProposalStatus.APPROVED,
+                    ProposalStatus.EXECUTING,
+                )
 
-            tool_res = self.tool_registry.execute_tool(
-                tool_name=step.tool_name,
-                params=exec_params,
-                context=context,
-            )
+            # Transition proposal to EXECUTING during dispatch
+            if proposal.status != ProposalStatus.EXECUTING:
+                proposal.status = ProposalStatus.EXECUTING
+
+            try:
+                tool_res = self.tool_registry.execute_tool(
+                    tool_name=step.tool_name,
+                    params=exec_params,
+                    context=context,
+                )
+            except Exception as exc:
+                logger.error(f"Unhandled exception during tool '{step.tool_name}' execution: {exc}")
+                proposal.mark_failed(f"Tool execution exception: {exc}")
+                step.status = StepStatus.FAILED
+                step.error = f"Tool execution exception: {exc}"
+                if self.event_bus:
+                    self.event_bus.publish(
+                        AgentEvent(
+                            event_type=AgentEventType.STEP_FAILED,
+                            payload={"step_id": step.step_id, "error": step.error},
+                        )
+                    )
+                return "replan_needed"
 
             if tool_res.status == ToolExecutionStatus.SUCCESS:
                 # Independent Outcome Verification against ground truth

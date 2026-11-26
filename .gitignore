@@ -31,6 +31,9 @@ env/
 .env
 .env.local
 *.key
+.*.key
+.proposal_key
+data/.proposal_key
 *.pem
 *.enc
 scratch/

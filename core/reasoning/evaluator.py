@@ -2,8 +2,8 @@
 
 Evaluates candidate options across 10 engineering dimensions:
 1. Correctness (meets user goal and specifications)
-2. Reliability (robust under adverse or edge-case conditions)
-3. Security (complies with permission boundaries, zero prompt injection risk)
+2. Security (complies with permission boundaries, zero prompt injection risk)
+3. Reliability (robust under adverse or edge-case conditions)
 4. Complexity (simplicity, minimal dependencies)
 5. Cost (token and API consumption)
 6. Execution time (latency and throughput)
@@ -15,9 +15,20 @@ Evaluates candidate options across 10 engineering dimensions:
 
 from __future__ import annotations
 
+import math
+from enum import StrEnum
 from typing import Any
 
 from core.persian.models import DecisionOption, RiskLevel
+
+
+class ScoreProvenance(StrEnum):
+    """Origin tracking for evaluation scores."""
+
+    MEASURED = "measured"
+    RULE_DERIVED = "rule_derived"
+    USER_PROVIDED = "user_provided"
+    UNKNOWN = "unknown"
 
 
 class AlternativeEvaluator:
@@ -36,14 +47,43 @@ class AlternativeEvaluator:
         "execution_time": 0.04,
     }
 
+    CANONICAL_DIMENSIONS = (
+        "correctness",
+        "security",
+        "reliability",
+        "complexity",
+        "cost",
+        "execution_time",
+        "maintainability",
+        "reversibility",
+        "compatibility",
+        "user_preferences",
+    )
+
     def __init__(self, weights: dict[str, float] | None = None) -> None:
         raw_weights = weights or self.DEFAULT_WEIGHTS
-        valid_weights = {k: max(0.0, float(v)) for k, v in raw_weights.items()}
+        valid_weights: dict[str, float] = {}
+        for k, v in raw_weights.items():
+            if k not in self.CANONICAL_DIMENSIONS:
+                continue
+            try:
+                val = float(v)
+                if math.isnan(val) or math.isinf(val) or val < 0.0:
+                    val = 0.0
+            except (ValueError, TypeError):
+                val = 0.0
+            valid_weights[k] = val
+
+        # Ensure all canonical dimensions are present
+        for dim in self.CANONICAL_DIMENSIONS:
+            if dim not in valid_weights:
+                valid_weights[dim] = 0.0
+
         total = sum(valid_weights.values())
-        if total > 0:
+        if total > 0.0:
             self.weights = {k: v / total for k, v in valid_weights.items()}
         else:
-            self.weights = self.DEFAULT_WEIGHTS
+            self.weights = self.DEFAULT_WEIGHTS.copy()
 
     def evaluate_candidates(
         self,
@@ -66,31 +106,51 @@ class AlternativeEvaluator:
             description = cand.get("description", "")
             risk = cand.get("risk_level", RiskLevel.READ_ONLY)
             raw_scores = cand.get("dimension_scores", {})
+            explicit_provenance = cand.get("score_provenance", {})
 
             # Default scores across all 10 canonical dimensions (0.0 to 1.0)
-            scores = {
-                "correctness": float(raw_scores.get("correctness", 0.8)),
-                "security": float(
-                    raw_scores.get(
-                        "security",
-                        0.9
-                        if risk in (RiskLevel.READ_ONLY, RiskLevel.REVERSIBLE_MODIFICATION)
-                        else 0.4,
-                    )
-                ),
-                "reliability": float(raw_scores.get("reliability", 0.8)),
-                "reversibility": float(
-                    raw_scores.get(
-                        "reversibility", 0.95 if risk != RiskLevel.DESTRUCTIVE_OPERATION else 0.2
-                    )
-                ),
-                "compatibility": float(raw_scores.get("compatibility", 0.95)),
-                "maintainability": float(raw_scores.get("maintainability", 0.85)),
-                "user_preferences": float(raw_scores.get("user_preferences", 0.8)),
-                "complexity": float(raw_scores.get("complexity", 0.8)),
-                "cost": float(raw_scores.get("cost", 0.85)),
-                "execution_time": float(raw_scores.get("execution_time", 0.8)),
-            }
+            scores: dict[str, float] = {}
+            provenance_map: dict[str, str] = {}
+
+            for dim in self.CANONICAL_DIMENSIONS:
+                if dim in raw_scores:
+                    try:
+                        val = float(raw_scores[dim])
+                        if math.isnan(val) or math.isinf(val):
+                            val = 0.0
+                        scores[dim] = max(0.0, min(1.0, val))
+                        provenance_map[dim] = explicit_provenance.get(
+                            dim, ScoreProvenance.USER_PROVIDED.value
+                        )
+                    except (ValueError, TypeError):
+                        scores[dim] = 0.0
+                        provenance_map[dim] = ScoreProvenance.UNKNOWN.value
+                else:
+                    provenance_map[dim] = ScoreProvenance.RULE_DERIVED.value
+                    if dim == "correctness":
+                        scores[dim] = 0.8
+                    elif dim == "security":
+                        scores[dim] = (
+                            0.9
+                            if risk in (RiskLevel.READ_ONLY, RiskLevel.REVERSIBLE_MODIFICATION)
+                            else 0.4
+                        )
+                    elif dim == "reliability":
+                        scores[dim] = 0.8
+                    elif dim == "reversibility":
+                        scores[dim] = 0.95 if risk != RiskLevel.DESTRUCTIVE_OPERATION else 0.2
+                    elif dim == "compatibility":
+                        scores[dim] = 0.95
+                    elif dim == "maintainability":
+                        scores[dim] = 0.85
+                    elif dim == "user_preferences" or dim == "complexity":
+                        scores[dim] = 0.8
+                    elif dim == "cost":
+                        scores[dim] = 0.85
+                    elif dim == "execution_time":
+                        scores[dim] = 0.8
+                    else:
+                        scores[dim] = 0.5
 
             # Constraint and hard safety enforcement
             reasons: list[str] = []
@@ -135,6 +195,7 @@ class AlternativeEvaluator:
                     title=title,
                     description=description,
                     trade_offs=scores,
+                    score_provenance=provenance_map,
                     risk_level=risk,
                     score=total_score,
                     is_recommended=False,
@@ -142,14 +203,14 @@ class AlternativeEvaluator:
                 )
             )
 
-        # Sort descending deterministically: valid candidates first, then score, then option_id
+        # Deterministic tie-breaking:
+        # Compliant candidates first (0 < 1), highest score (-score), then ascending option_id
         evaluated.sort(
             key=lambda o: (
-                not any("Violates hard constraint" in r for r in o.reasons),
-                o.score,
+                0 if not any("Violates hard constraint" in r for r in o.reasons) else 1,
+                -round(o.score, 4),
                 o.option_id,
-            ),
-            reverse=True,
+            )
         )
         if (
             evaluated
@@ -162,6 +223,7 @@ class AlternativeEvaluator:
                 title=evaluated[0].title,
                 description=evaluated[0].description,
                 trade_offs=evaluated[0].trade_offs,
+                score_provenance=evaluated[0].score_provenance,
                 risk_level=evaluated[0].risk_level,
                 score=evaluated[0].score,
                 is_recommended=True,

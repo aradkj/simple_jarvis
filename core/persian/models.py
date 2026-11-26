@@ -315,6 +315,7 @@ class DecisionOption(BaseModel):
     trade_offs: dict[str, Any] = Field(
         default_factory=dict
     )  # correctness, security, complexity, time, cost
+    score_provenance: dict[str, str] = Field(default_factory=dict)
     risk_level: RiskLevel = RiskLevel.READ_ONLY
     score: float = 0.0
     is_recommended: bool = False

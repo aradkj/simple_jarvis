@@ -513,6 +513,9 @@ class DecisionEngine:
 
         auto_approve = getattr(context, "auto_approve", False) if context else False
         agent_mode = getattr(context, "agent_mode", "balanced") if context else "balanced"
+        if agent_mode == "aggressive":
+            # Documented alias: 'aggressive' maps identically to 'autonomous' for bounded automation
+            agent_mode = "autonomous"
 
         # 0. Active Context Policy & Prohibition Verification
         if context:

@@ -1,74 +1,66 @@
 [
   {
-    "directory_id": "e3e0ae5c-a784-497b-aaaa-a0836d3c29a2",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\pytest-of-ARAD\\pytest-479\\test_cert_power_approval_paths0\\authorized_docs",
-    "display_name": "authorized_docs",
-    "read_only": true,
-    "enabled": true,
-    "created_at": "2026-11-17T15:22:54.786004+00:00"
-  },
-  {
-    "directory_id": "365a7d2c-b58d-4ecf-849a-cfa5781d6648",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_l0lzx5y8",
+    "directory_id": "aeef9abe-b149-4e1a-9a2d-ffb866b3969e",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_p_s9dlhg",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.269296+00:00"
+    "created_at": "2026-11-26T15:07:40.807095+00:00"
   },
   {
-    "directory_id": "e2b3141d-51bb-4d04-bbbe-b428fc736286",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_wdgj98q7",
+    "directory_id": "10e2ad96-73cf-4fe4-a7ae-e966832b5d75",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_5v6h8uk8",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.292367+00:00"
+    "created_at": "2026-11-26T15:07:40.828324+00:00"
   },
   {
-    "directory_id": "eebed1ce-ccab-41bf-a121-0dd5d3aec84e",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_ovgsk1jh",
+    "directory_id": "93a5d6f3-c253-4669-84b9-323e9b729eec",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_kd3eaczd",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.319586+00:00"
+    "created_at": "2026-11-26T15:07:40.852478+00:00"
   },
   {
-    "directory_id": "f9e8c3e5-5b38-4f81-a495-613a1637b2be",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_yvvf0jsq",
+    "directory_id": "f3653a48-1536-4d48-a8a5-49730bbee5d5",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_kh0dza57",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.349745+00:00"
+    "created_at": "2026-11-26T15:07:40.939808+00:00"
   },
   {
-    "directory_id": "9c7f09e0-78b0-4bec-8c17-53fa6ab16781",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_8lu4fg9l",
+    "directory_id": "f6471893-b050-487f-9579-af872fd56aa8",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_h81b0zh5",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.372557+00:00"
+    "created_at": "2026-11-26T15:07:40.961733+00:00"
   },
   {
-    "directory_id": "bfcff477-50b8-4928-b8d8-681de7034a5c",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_lz7xgq61",
+    "directory_id": "fee05147-3957-430f-9494-a0e56f3bb7bf",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_vq8ecqfl",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.394573+00:00"
+    "created_at": "2026-11-26T15:07:41.058559+00:00"
   },
   {
-    "directory_id": "ce907d3b-5277-4d35-8bec-55765e9659bb",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_wibqw9xz",
+    "directory_id": "058f9603-5535-4c07-a827-73fc5a793fc8",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_fs_test_85vs4rl_",
     "display_name": "TestTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.443741+00:00"
+    "created_at": "2026-11-26T15:07:41.097787+00:00"
   },
   {
-    "directory_id": "0ef5c515-d04e-4c71-82ee-b3b9afd6c399",
-    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_tool_test_wmaobmql",
+    "directory_id": "4b061c8c-ae9c-463e-9fba-8f69bf0c240d",
+    "path": "C:\\Users\\aradb\\AppData\\Local\\Temp\\jarvis_tool_test_a0hzce5q",
     "display_name": "ToolTemp",
     "read_only": true,
     "enabled": true,
-    "created_at": "2026-11-17T20:44:03.490408+00:00"
+    "created_at": "2026-11-26T15:07:41.219005+00:00"
   }
 ]

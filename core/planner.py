@@ -593,6 +593,15 @@ class AgentPlanner:
             constraint_rules += f"\n6. PROHIBITED ACTIONS: The user explicitly prohibited: {', '.join(prohibited_actions)}."
 
         reasoning_steps = context.metadata.get("reasoning_plan_steps")
+        if reasoning_steps and isinstance(reasoning_steps, list) and len(reasoning_steps) > 0:
+            logger.info("Executing plan generated directly from ReasoningSolver decomposition.")
+            return self.build_plan_from_reasoning(
+                goal=goal,
+                reasoning_steps=reasoning_steps,
+                context=context,
+                available_tools=available_tools,
+            )
+
         reason_hint = ""
         if reasoning_steps:
             reason_hint = (
@@ -693,6 +702,141 @@ class AgentPlanner:
                 )
             )
 
+        return plan
+
+    def build_plan_from_reasoning(
+        self,
+        goal: str,
+        reasoning_steps: list[dict[str, Any]],
+        context: ExecutionContext,
+        available_tools: list[ToolDefinition] | None = None,
+    ) -> Plan:
+        """Translate structured reasoning solver output into a validated executable Plan."""
+        if context.is_cancelled():
+            raise PlanValidationError("Planning cancelled before generation.")
+
+        registered_tools = {t.name: t for t in (available_tools or [])}
+        is_read_only = bool(context.metadata.get("read_only", False))
+        prohibited_actions = [
+            str(p).lower().strip() for p in context.metadata.get("prohibited_actions", [])
+        ]
+
+        tool_alias_map = {
+            "file_inspect": "file_inspect"
+            if "file_inspect" in registered_tools
+            else "file_read_text",
+            "file_write": "file_write_text",
+            "file_read": "file_read_text",
+            "terminal_execute": "terminal_restricted_exec",
+            "path_security": "file_inspect"
+            if "file_inspect" in registered_tools
+            else "file_read_text",
+        }
+
+        parsed_steps: list[PlanStep] = []
+        step_id_map: dict[Any, str] = {}
+
+        for idx, s_data in enumerate(reasoning_steps):
+            step_idx = s_data.get("step", idx + 1)
+            desc = s_data.get("description", f"Execute reasoning step {step_idx}")
+            tool_hint = s_data.get("tool_hint")
+            new_id = str(uuid.uuid4())
+            step_id_map[step_idx] = new_id
+            step_id_map[idx] = new_id
+
+            target_tool = None
+            if tool_hint:
+                if tool_hint in registered_tools:
+                    target_tool = tool_hint
+                elif tool_hint in tool_alias_map and tool_alias_map[tool_hint] in registered_tools:
+                    target_tool = tool_alias_map[tool_hint]
+                else:
+                    # Scenario B: Unregistered / invalid tool hint
+                    # Planner rejects or safely resolves the hint: turns into THOUGHT step so no unregistered tool executes
+                    logger.warning(
+                        f"Unregistered tool hint '{tool_hint}' in reasoning step {step_idx}; falling back to analytical thought step."
+                    )
+                    target_tool = None
+
+            # Policy enforcement on planned tool
+            if target_tool:
+                # 1. Read-only restriction
+                if is_read_only and target_tool in (
+                    "file_write_text",
+                    "file_delete",
+                    "file_edit_text",
+                ):
+                    logger.warning(f"Tool '{target_tool}' blocked by active read-only policy.")
+                    target_tool = None
+
+                # 2. Context prohibitions
+                for p in prohibited_actions:
+                    if p.startswith("do_not_touch_"):
+                        tok = p.replace("do_not_touch_", "").strip()
+                        if tok and (
+                            tok in target_tool.lower()
+                            or tok in str(s_data.get("parameters", {})).lower()
+                        ):
+                            logger.warning(
+                                f"Tool '{target_tool}' blocked by prohibition policy: {p}"
+                            )
+                            target_tool = None
+                            break
+                    elif (
+                        p in ("no_unauthorized_deletion", "no_deletion")
+                        and "delete" in target_tool.lower()
+                    ):
+                        logger.warning(f"Tool '{target_tool}' blocked by prohibition policy: {p}")
+                        target_tool = None
+                        break
+
+            stype = StepType.TOOL_CALL if target_tool else StepType.THOUGHT
+            params = dict(s_data.get("parameters") or {})
+
+            # Prerequisite mapping to dependencies
+            deps: list[str] = []
+            prereqs = s_data.get("prerequisites", [])
+            if prereqs and idx > 0 and parsed_steps:
+                prev_id = parsed_steps[idx - 1].step_id
+                if prev_id:
+                    deps.append(prev_id)
+
+            step = PlanStep(
+                step_id=new_id,
+                description=desc,
+                step_type=stype,
+                tool_name=target_tool,
+                parameters=params,
+                dependencies=deps,
+                status=StepStatus.PENDING,
+                max_retries=self.settings.agent_max_step_retries,
+            )
+            parsed_steps.append(step)
+
+        # Ensure final synthesis step is present
+        if not parsed_steps or parsed_steps[-1].step_type != StepType.SYNTHESIS:
+            synth_id = str(uuid.uuid4())
+            synth_deps = [parsed_steps[-1].step_id] if parsed_steps else []
+            parsed_steps.append(
+                PlanStep(
+                    step_id=synth_id,
+                    description="Synthesize final truthful outcome for user",
+                    step_type=StepType.SYNTHESIS,
+                    tool_name=None,
+                    parameters={},
+                    dependencies=synth_deps,
+                    status=StepStatus.PENDING,
+                )
+            )
+
+        plan = Plan(
+            goal=goal,
+            session_id=context.session_id,
+            steps=parsed_steps,
+            estimated_complexity=context.metadata.get("task_complexity", "medium"),
+            completion_condition="All planned steps and outcome verifications completed",
+        )
+        plan.validate_acyclic()
         return plan
 
     def replan(

@@ -129,7 +129,7 @@ class StrictDefaultDenyPermissionManager(BasePermissionManager):
 
     def grant_proposal(self, proposal_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
         """Grant a single-use authorization for an exact proposal and parameter set."""
-        clean_args = {k: v for k, v in arguments.items() if not str(k).startswith("_")}
+        clean_args = {k: v for k, v in arguments.items() if k != "_proposal_id"}
         sig = f"{tool_name}:{sorted(clean_args.items())}"
         self._approved_proposals[proposal_id] = (tool_name, sig)
 
@@ -165,7 +165,7 @@ class StrictDefaultDenyPermissionManager(BasePermissionManager):
         proposal_id = request.parameters.get("_proposal_id")
         if proposal_id and proposal_id in self._approved_proposals:
             expected_tool, expected_sig = self._approved_proposals[proposal_id]
-            clean_args = {k: v for k, v in request.parameters.items() if not str(k).startswith("_")}
+            clean_args = {k: v for k, v in request.parameters.items() if k != "_proposal_id"}
             actual_sig = f"{request.tool_name}:{sorted(clean_args.items())}"
             # Consume authorization regardless of match to enforce single-use
             self._approved_proposals.pop(proposal_id, None)

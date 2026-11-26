@@ -279,7 +279,8 @@ class ApprovalManager:
                     return False
 
                 if approved:
-                    proposal.approve()
+                    if proposal.status != ProposalStatus.APPROVED:
+                        proposal.approve()
                     if self.permission_manager and hasattr(
                         self.permission_manager, "grant_proposal"
                     ):
@@ -301,7 +302,8 @@ class ApprovalManager:
                         )
                     return True
                 else:
-                    proposal.reject(reason or "User rejected tool proposal.")
+                    if proposal.status != ProposalStatus.REJECTED:
+                        proposal.reject(reason or "User rejected tool proposal.")
                     logger.info(f"Proposal '{proposal_id}' rejected: {reason}")
                     if self.event_bus:
                         self.event_bus.publish(
