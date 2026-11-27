@@ -272,8 +272,9 @@ class ApprovalManager:
                 approved, reason = self._decisions.get(proposal_id, (False, "No decision recorded"))
 
                 # Tamper check: Ensure tool name and arguments were not modified
-                current_sig = proposal.compute_signature()
-                if current_sig != initial_sig:
+                # We compare signature computed without approval metadata against initial_sig
+                pre_decision_sig = proposal.compute_signature(include_approval_metadata=False)
+                if pre_decision_sig != initial_sig:
                     proposal.reject("Proposal parameters were tampered with after request.")
                     logger.error(f"Proposal '{proposal_id}' rejected due to signature mismatch.")
                     return False

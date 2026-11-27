@@ -58,6 +58,8 @@ class ExecutionContext:
     user_id: str = "local_user"
     project_id: str | None = None
     memory_context: str = ""
+    auto_approve: bool = False
+    agent_mode: str = "balanced"
     cancellation_token: CancellationToken = field(default_factory=CancellationToken)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -78,6 +80,8 @@ class ExecutionContext:
             user_id=self.user_id,
             project_id=self.project_id,
             memory_context=self.memory_context,
+            auto_approve=self.auto_approve,
+            agent_mode=self.agent_mode,
             cancellation_token=self.cancellation_token,
             metadata=dict(self.metadata),
         )

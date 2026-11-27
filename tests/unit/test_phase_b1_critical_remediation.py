@@ -15,15 +15,16 @@ import concurrent.futures
 import math
 import secrets
 import tempfile
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
-from config import save_env_settings
+from config import Settings, save_env_settings
 from core.decision.engine import DecisionEngine
 from core.execution_context import ExecutionContext
 from core.executor import AgentExecutor
@@ -34,7 +35,7 @@ from core.permissions import (
     StrictDefaultDenyPermissionManager,
 )
 from core.persian.models import RiskLevel
-from core.planner import AgentPlanner, Plan, PlanStep, StepStatus, StepType
+from core.planner import AgentPlanner, Plan, PlanStep, PlanValidationError, StepStatus, StepType
 from core.reasoning.evaluator import AlternativeEvaluator, ScoreProvenance
 from core.reasoning.solver import MultiStepProblemSolver
 from core.state_machine import AgentStateMachine
@@ -51,7 +52,7 @@ from core.tool_proposal import (
 )
 from core.tool_registry import ToolRegistry
 from memory.embeddings import LocalNeuralEmbeddingProvider, LocalSemanticEmbeddingProvider
-from tools.base import BaseTool, ToolResult
+from tools.base import BaseTool, ToolExecutionStatus, ToolResult
 
 
 @pytest.fixture(autouse=True)
@@ -1190,3 +1191,448 @@ class TestConfigurationPersistence:
         finally:
             if t_path.exists():
                 t_path.unlink()
+
+
+# ==============================================================================
+# SECTION 5: POST-PUSH AUDIT ADVERSARIAL REMEDIATION TESTS
+# ==============================================================================
+
+
+class _GenericMockInput(BaseModel):
+    model_config = {"extra": "allow"}
+
+
+class DynamicMockTool(BaseTool):
+    def __init__(
+        self,
+        tool_name: str,
+        category: PermissionCategory,
+        requires_approval: bool = False,
+        risk_level: ProposalRiskLevel = ProposalRiskLevel.LOW,
+    ):
+        self.name = tool_name
+        self.description = f"Mock tool {tool_name}"
+        self.category = category
+        self.input_schema = _GenericMockInput
+        self._requires_approval = requires_approval
+        self._risk_level = risk_level
+        self.executed = False
+        super().__init__()
+
+    def execute(self, params: BaseModel, context: ExecutionContext) -> ToolResult:
+        self.executed = True
+        return ToolResult.success(data={"status": "executed", "tool": self.name})
+
+    def get_definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name,
+            description=self.description,
+            category=self.category,
+            risk_level=self._risk_level,
+            requires_approval=self._requires_approval,
+            parameters_schema={"type": "object", "properties": {}},
+        )
+
+
+def _build_test_executor(reg: ToolRegistry) -> AgentExecutor:
+    mock_ai = MagicMock()
+    mock_ai.is_ready.return_value = True
+    planner = AgentPlanner(provider_manager=mock_ai)
+    state_machine = AgentStateMachine()
+    settings = Settings(
+        app_name="JARVIS",
+        default_provider="gemini",
+        gemini_api_key=SecretStr("mock_key"),
+        agent_mode="balanced",
+    )
+    return AgentExecutor(
+        tool_registry=reg,
+        provider_manager=mock_ai,
+        planner=planner,
+        state_machine=state_machine,
+        settings=settings,
+    )
+
+
+class TestPostPushRemediationSuite:
+    """Verifies that all post-push audit defects (1 to 6) are strictly enforced and verified."""
+
+    def test_section1_critical_risk_never_bypasses_approval_in_auto_approve(self):
+        """CRITICAL operations must never execute under auto_approve=True."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="critical_tool",
+            category=PermissionCategory.DESTRUCTIVE,
+            requires_approval=True,
+            risk_level=ProposalRiskLevel.CRITICAL,
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+
+        step = PlanStep(
+            step_id="step_crit",
+            step_type=StepType.TOOL_CALL,
+            tool_name="critical_tool",
+            parameters={"target": "root", "force": True},
+        )
+        plan = Plan(goal="Critical operation", steps=[step])
+        ctx = ExecutionContext(auto_approve=True)
+
+        outcome = executor.execute_plan(plan, ctx, wait_for_approval=False)
+        assert outcome.status == "waiting_for_approval"
+        assert not mock_tool.executed, "Tool execute() must NEVER be called without approval"
+
+    def test_section1_critical_risk_never_bypasses_approval_in_autonomous_mode(self):
+        """CRITICAL operations must never execute under agent_mode='autonomous'."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="critical_tool",
+            category=PermissionCategory.DESTRUCTIVE,
+            requires_approval=True,
+            risk_level=ProposalRiskLevel.CRITICAL,
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+        executor.settings.agent_mode = "autonomous"
+
+        step = PlanStep(
+            step_id="step_crit_auto",
+            step_type=StepType.TOOL_CALL,
+            tool_name="critical_tool",
+            parameters={"target": "root", "force": True},
+        )
+        plan = Plan(goal="Critical operation in autonomous mode", steps=[step])
+        ctx = ExecutionContext()
+
+        outcome = executor.execute_plan(plan, ctx, wait_for_approval=False)
+        assert outcome.status == "waiting_for_approval"
+        assert not mock_tool.executed, "Tool execute() must NEVER be called without approval"
+
+    def test_section1_high_risk_requires_approval_in_autonomous_mode(self):
+        """HIGH risk operations must require approval in autonomous mode."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="sensitive_file_read",
+            category=PermissionCategory.FILE_READ,
+            risk_level=ProposalRiskLevel.HIGH,
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+        executor.settings.agent_mode = "autonomous"
+
+        # Parameter with sensitive credential keywords escalates to HIGH risk
+        step = PlanStep(
+            step_id="step_high",
+            step_type=StepType.TOOL_CALL,
+            tool_name="sensitive_file_read",
+            parameters={"path": "config.json", "password": "secret_key_123"},
+        )
+        plan = Plan(goal="High risk credentials", steps=[step])
+        ctx = ExecutionContext()
+
+        outcome = executor.execute_plan(plan, ctx, wait_for_approval=False)
+        assert outcome.status == "waiting_for_approval"
+        assert not mock_tool.executed, "High risk tool must not execute without approval"
+
+    def test_section1_requires_approval_tool_metadata_respected(self):
+        """Tool declaring requires_approval=True must require confirmation even with low risk."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="audit_report_tool",
+            category=PermissionCategory.READ_ONLY,
+            requires_approval=True,
+            risk_level=ProposalRiskLevel.LOW,
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+        executor.settings.agent_auto_approve_low_risk = True
+
+        step = PlanStep(
+            step_id="step_meta_app",
+            step_type=StepType.TOOL_CALL,
+            tool_name="audit_report_tool",
+            parameters={"query": "test"},
+        )
+        plan = Plan(goal="Metadata requires approval", steps=[step])
+        ctx = ExecutionContext(auto_approve=True)
+
+        outcome = executor.execute_plan(plan, ctx, wait_for_approval=False)
+        assert outcome.status == "waiting_for_approval"
+        assert not mock_tool.executed
+
+    def test_section1_browser_sensitive_operation_protected(self):
+        """Browser interactions on submit/payment buttons must require confirmation."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="browser_click_element",
+            category=PermissionCategory.BROWSER_INTERACT,
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+
+        step = PlanStep(
+            step_id="step_browser_pay",
+            step_type=StepType.TOOL_CALL,
+            tool_name="browser_click_element",
+            parameters={"selector": "button#submit-payment"},
+        )
+        plan = Plan(goal="Submit payment", steps=[step])
+        ctx = ExecutionContext(auto_approve=True)
+
+        outcome = executor.execute_plan(plan, ctx, wait_for_approval=False)
+        assert outcome.status == "waiting_for_approval"
+        assert not mock_tool.executed
+
+    def test_section1_direct_registry_execution_without_authorization_denied(self):
+        """Direct invocation of execute_tool on ToolRegistry fails closed if unapproved."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="protected_tool", category=PermissionCategory.DESTRUCTIVE
+        )
+        reg.register(mock_tool)
+
+        ctx = ExecutionContext()
+        res = reg.execute_tool("protected_tool", {"action": "destroy"}, ctx)
+        assert res.status == ToolExecutionStatus.DENIED
+        assert not mock_tool.executed
+
+    def test_section2_acl_verification_and_fail_closed_on_failure(self, tmp_path, monkeypatch):
+        """_verify_file_permissions and _restrict_file_permissions fail closed on command error."""
+        from core.tool_proposal import _restrict_file_permissions, _verify_file_permissions
+
+        test_file = tmp_path / "key.dat"
+        test_file.write_bytes(secrets.token_bytes(32))
+
+        # Test simulated icacls failure
+        class DummyFailedProcess:
+            returncode = 1
+            stdout = "Access is denied"
+            stderr = "Error occurred"
+
+        monkeypatch.setattr("subprocess.run", lambda *a, **kw: DummyFailedProcess())
+        assert _restrict_file_permissions(test_file) is False
+        assert _verify_file_permissions(test_file) is False
+
+    def test_section2_insecure_key_file_rejected_if_remediation_fails(self, tmp_path, monkeypatch):
+        """Existing key file with insecure ACL refuses to load if ACL cannot be restricted."""
+        key_file = tmp_path / ".insecure_key"
+        key_file.write_bytes(secrets.token_bytes(32))
+        monkeypatch.setenv("JARVIS_PROPOSAL_KEY_FILE", str(key_file))
+        reset_proposal_signing_key()
+
+        # Simulate permanent ACL failure
+        monkeypatch.setattr("core.tool_proposal._verify_file_permissions", lambda p: False)
+        monkeypatch.setattr("core.tool_proposal._restrict_file_permissions", lambda p: False)
+
+        with pytest.raises(PermissionError, match="insecure ACL permissions"):
+            get_proposal_signing_key()
+
+    def test_section2_existing_key_file_preserved_without_rotation(self, tmp_path, monkeypatch):
+        """Valid existing key file is loaded and strictly preserved without rotation."""
+        original_key = secrets.token_bytes(32)
+        key_file = tmp_path / ".valid_key"
+        key_file.write_bytes(original_key)
+        monkeypatch.setenv("JARVIS_PROPOSAL_KEY_FILE", str(key_file))
+        reset_proposal_signing_key()
+
+        # Ensure verified secure
+        monkeypatch.setattr("core.tool_proposal._verify_file_permissions", lambda p: True)
+
+        loaded_key = get_proposal_signing_key()
+        assert loaded_key == original_key
+        assert key_file.read_bytes() == original_key, "Key file must not be modified or overwritten"
+
+    def test_section3_lifecycle_state_machine_legal_transitions(self):
+        """Lifecycle state machine strictly enforces legal transitions."""
+        p = ToolProposal(tool_name="test_tool")
+        assert p.status == ProposalStatus.PROPOSED
+
+        p.approve()
+        assert p.status == ProposalStatus.APPROVED
+
+        # Cannot approve twice
+        with pytest.raises(ValueError, match="already approved"):
+            p.approve()
+
+        # Single-use consumption APPROVED -> EXECUTING
+        assert p.consume_for_execution() is True
+        assert p.status == ProposalStatus.EXECUTING
+
+        # Cannot consume twice
+        assert p.consume_for_execution() is False
+
+        # Cannot reject from EXECUTING
+        # (p is executing, transition to EXECUTED)
+        p.mark_executed("result_data")
+        assert p.status == ProposalStatus.EXECUTED
+
+        # Cannot reject or cancel or mark_failed from EXECUTED
+        with pytest.raises(ValueError, match="terminal status"):
+            p.reject("deny")
+        with pytest.raises(ValueError, match="terminal status"):
+            p.cancel("abort")
+        with pytest.raises(ValueError, match="already executed"):
+            p.mark_failed("fail")
+
+    def test_section3_concurrent_consumption_is_thread_safe(self):
+        """Multi-threaded concurrent consume_for_execution only allows exactly 1 winner."""
+        p = ToolProposal(tool_name="concurrent_tool")
+        p.approve()
+
+        results = []
+        barrier = threading.Barrier(20)
+
+        def worker():
+            barrier.wait()
+            results.append(p.consume_for_execution())
+
+        threads = [threading.Thread(target=worker) for _ in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert results.count(True) == 1
+        assert results.count(False) == 19
+        assert p.status == ProposalStatus.EXECUTING
+
+    def test_section4_approval_ttl_window_300s_enforced(self):
+        """Approval default TTL is 300s and enforces expiration boundary."""
+        from core.tool_proposal import PROPOSAL_APPROVAL_TTL_SECONDS
+
+        assert PROPOSAL_APPROVAL_TTL_SECONDS == 300.0
+
+        p = ToolProposal(tool_name="ttl_tool")
+        p.approve()
+        assert p.expires_at is not None
+        assert p.approved_at is not None
+        delta = (p.expires_at - p.approved_at).total_seconds()
+        assert math.isclose(delta, 300.0, rel_tol=1e-2)
+        assert p.is_valid_approval() is True
+
+        # Fast forward time beyond 300s
+        p.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        assert p.is_valid_approval() is False
+
+    def test_section4_approved_at_mutation_cannot_extend_validity(self):
+        """Mutating approved_at or expires_at fails validation."""
+        p = ToolProposal(tool_name="time_tamper")
+        p.approve()
+        assert p.is_valid_approval() is True
+
+        # Setting approved_at into distant past beyond expiration
+        p.approved_at = datetime.now(UTC) - timedelta(hours=2)
+        assert p.is_valid_approval() is False
+
+    def test_section5_reasoning_step3_depending_on_step1(self):
+        """Step 3 can depend on Step 1 skipping Step 2."""
+        planner = AgentPlanner(provider_manager=None)
+        ctx = ExecutionContext()
+        reasoning_steps = [
+            {"step": 1, "action": "init", "description": "Step 1", "tool_hint": None},
+            {"step": 2, "action": "aux", "description": "Step 2", "tool_hint": None},
+            {
+                "step": 3,
+                "action": "dep",
+                "description": "Step 3",
+                "prerequisites": [1],
+                "tool_hint": None,
+            },
+        ]
+        plan = planner.build_plan_from_reasoning("Test non-sequential", reasoning_steps, ctx)
+        step1 = plan.steps[0]
+        step2 = plan.steps[1]
+        step3 = plan.steps[2]
+
+        assert step3.dependencies == [step1.step_id]
+        assert step2.step_id not in step3.dependencies
+
+    def test_section5_multiple_prerequisites(self):
+        """Step can depend on multiple prerequisites."""
+        planner = AgentPlanner(provider_manager=None)
+        ctx = ExecutionContext()
+        reasoning_steps = [
+            {"step": 1, "description": "Step 1"},
+            {"step": 2, "description": "Step 2"},
+            {"step": 3, "description": "Step 3", "prerequisites": [1, 2]},
+        ]
+        plan = planner.build_plan_from_reasoning("Test multiple prereqs", reasoning_steps, ctx)
+        step1 = plan.steps[0]
+        step2 = plan.steps[1]
+        step3 = plan.steps[2]
+
+        assert set(step3.dependencies) == {step1.step_id, step2.step_id}
+
+    def test_section5_missing_or_unknown_prerequisite_fails_safely(self):
+        """Unknown numeric prerequisite ID raises PlanValidationError."""
+        planner = AgentPlanner(provider_manager=None)
+        ctx = ExecutionContext()
+        reasoning_steps = [
+            {"step": 1, "description": "Step 1"},
+            {"step": 2, "description": "Step 2", "prerequisites": [999]},
+        ]
+        with pytest.raises(PlanValidationError, match="Unknown prerequisite reference"):
+            planner.build_plan_from_reasoning("Unknown prereq", reasoning_steps, ctx)
+
+    def test_section5_duplicate_step_identifiers_fail_validation(self):
+        """Duplicate step identifiers in reasoning steps raise PlanValidationError."""
+        planner = AgentPlanner(provider_manager=None)
+        ctx = ExecutionContext()
+        reasoning_steps = [
+            {"step": 1, "description": "Step 1"},
+            {"step": 1, "description": "Duplicate Step 1"},
+        ]
+        with pytest.raises(PlanValidationError, match="Duplicate step identifier"):
+            planner.build_plan_from_reasoning("Duplicate steps", reasoning_steps, ctx)
+
+    def test_section5_cyclic_dependencies_detected_and_rejected(self):
+        """Cycles in declared dependencies are detected and raise PlanValidationError."""
+        planner = AgentPlanner(provider_manager=None)
+        ctx = ExecutionContext()
+        # Direct self-dependency
+        reasoning_steps = [
+            {"step": 1, "description": "Self dependency", "prerequisites": [1]},
+        ]
+        with pytest.raises(PlanValidationError, match="self-dependency"):
+            planner.build_plan_from_reasoning("Self cycle", reasoning_steps, ctx)
+
+    def test_section5_failed_prerequisite_prevents_dependent_step_execution(self):
+        """If step 1 fails, step 2 depending on step 1 does not execute."""
+        reg = ToolRegistry()
+        mock_tool = DynamicMockTool(
+            tool_name="dependent_tool", category=PermissionCategory.READ_ONLY
+        )
+        reg.register(mock_tool)
+        executor = _build_test_executor(reg)
+
+        step1 = PlanStep(
+            step_id="s1",
+            description="Step 1 fail",
+            step_type=StepType.THOUGHT,
+            status=StepStatus.FAILED,
+        )
+        step2 = PlanStep(
+            step_id="s2",
+            description="Step 2 tool",
+            step_type=StepType.TOOL_CALL,
+            tool_name="dependent_tool",
+            dependencies=["s1"],
+        )
+        plan = Plan(goal="Dependent plan", steps=[step1, step2])
+        ctx = ExecutionContext()
+
+        outcome = executor.execute_plan(plan, ctx)
+        assert outcome is not None
+        assert not mock_tool.executed, "Step 2 must not execute if prerequisite Step 1 failed"
+
+    def test_section6_v1_signature_format_consistency(self):
+        """Proposal signature starts with 'v1:' and binds canonical execution payload."""
+        p = ToolProposal(
+            tool_name="format_check",
+            arguments={"param1": "val1", "_browser_sensitive": True},
+        )
+        sig = p.compute_signature()
+        assert sig.startswith("v1:"), (
+            f"Signature must be explicitly versioned as 'v1:', got {sig[:10]}"
+        )
+        assert len(sig) == 3 + 64, "Signature format must be v1:<64-char sha256 hex>"

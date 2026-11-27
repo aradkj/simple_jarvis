@@ -562,18 +562,35 @@ class AgentExecutor:
                 )
 
             # Security Approval Check:
-            # High and Critical risk tools MUST ALWAYS require confirmation regardless of settings
-            # In autonomous mode or auto_approve context, non-critical authorized actions execute directly
-            if getattr(context, "auto_approve", False) or (
+            # - CRITICAL operations must NEVER bypass explicit user approval, regardless of auto_approve or autonomous mode.
+            # - HIGH risk and browser-sensitive operations must NEVER bypass approval, regardless of auto_approve or autonomous mode.
+            # - Tool metadata declaring requires_approval=True must be respected and cannot be bypassed by auto_approve or low-risk auto-approval.
+            # - In autonomous mode, bounded medium/low-risk non-sensitive operations (e.g. file writing in authorized dirs) proceed autonomously.
+            is_critical = risk == RiskLevel.CRITICAL
+            is_high = risk == RiskLevel.HIGH
+            is_browser_sensitive = bool(proposal_args.get("_browser_sensitive"))
+            explicit_tool_requires_approval = bool(
+                tool_def and getattr(tool_def, "requires_approval", False)
+            )
+            is_autonomous = (
                 getattr(self.settings, "agent_mode", "balanced") == "autonomous"
-                and risk != RiskLevel.CRITICAL
-            ):
+                or getattr(context, "agent_mode", "balanced") == "autonomous"
+            )
+
+            # 1. Mandatory security approval tiers: CRITICAL, HIGH, or browser-sensitive
+            # These can NEVER be bypassed by auto_approve OR autonomous mode
+            if is_critical or is_high or is_browser_sensitive:
+                needs_user_confirmation = True
+            # 2. Tool metadata declaring requires_approval:
+            # auto_approve and low-risk auto-approval cannot bypass explicit requires_approval.
+            # Only autonomous mode can execute bounded non-high/non-critical tools.
+            elif explicit_tool_requires_approval:
+                needs_user_confirmation = not is_autonomous
+            # 3. Autonomous mode or context auto_approve allows bounded non-critical operations
+            elif is_autonomous or getattr(context, "auto_approve", False):
                 needs_user_confirmation = False
-            elif (
-                risk in (RiskLevel.HIGH, RiskLevel.CRITICAL)
-                or req_approval
-                or not self.settings.agent_auto_approve_low_risk
-            ):
+            # 4. Central Decision Gateway requirement or risk-based policy
+            elif req_approval or not self.settings.agent_auto_approve_low_risk:
                 needs_user_confirmation = True
             else:
                 needs_user_confirmation = False

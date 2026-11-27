@@ -23,13 +23,18 @@ from core.permissions import PermissionCategory
 
 logger = logging.getLogger("jarvis.tool_proposal")
 
+PROPOSAL_APPROVAL_TTL_SECONDS: float = 300.0  # Documented 300-second approval expiration TTL
 _DEFAULT_KEY_FILE = Path("data/.proposal_key")
 _CACHED_SIGNING_KEY: bytes | None = None
 _KEY_LOCK = threading.Lock()
 
 
-def _restrict_file_permissions(file_path: Path) -> None:
-    """Restrict access permissions to current owner, SYSTEM, and Administrators."""
+def _restrict_file_permissions(file_path: Path) -> bool:
+    """Restrict access permissions to current owner, SYSTEM, and Administrators.
+
+    Fails closed: Returns True if restrictions were successfully applied and verified;
+    returns False if permission changes or verification failed.
+    """
     resolved = file_path.resolve()
     try:
         import stat
@@ -44,23 +49,73 @@ def _restrict_file_permissions(file_path: Path) -> None:
         user_domain = os.environ.get("USERDOMAIN", "")
         username = os.environ.get("USERNAME", "")
         user_spec = f"{user_domain}\\{username}" if user_domain and username else username
-        if user_spec:
-            cmd = [
-                "icacls",
-                str(resolved),
-                "/inheritance:r",
-                "/grant:r",
-                f"{user_spec}:(F)",
-                "/grant:r",
-                "SYSTEM:(F)",
-                "/grant:r",
-                "Administrators:(F)",
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode != 0:
-                logger.warning(
-                    f"icacls returned non-zero code {res.returncode}: {res.stderr or res.stdout}"
-                )
+        if not user_spec:
+            logger.warning("Could not determine Windows user specification for ACL restriction.")
+            return False
+
+        cmd = [
+            "icacls",
+            str(resolved),
+            "/inheritance:r",
+            "/grant:r",
+            f"{user_spec}:(F)",
+            "/grant:r",
+            "SYSTEM:(F)",
+            "/grant:r",
+            "Administrators:(F)",
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            logger.warning(
+                f"icacls restriction failed with code {res.returncode}: {res.stderr or res.stdout}"
+            )
+            return False
+
+        # Post-condition verification: inspect resulting Windows ACL directly
+        return _verify_file_permissions(resolved)
+    return True
+
+
+def _verify_file_permissions(file_path: Path) -> bool:
+    """Verify that file ACL is restricted to authorized identities (owner/SYSTEM/Administrators).
+
+    On Windows, uses `icacls` to verify that no unauthorized principals (e.g. Everyone, Users) have access.
+    Returns True if ACL is verified secure, False otherwise.
+    """
+    if os.name != "nt":
+        return True
+
+    resolved = file_path.resolve()
+    if not resolved.exists():
+        return False
+
+    import subprocess
+
+    cmd = ["icacls", str(resolved)]
+    res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if res.returncode != 0:
+        logger.warning(
+            f"icacls verification failed with code {res.returncode}: {res.stderr or res.stdout}"
+        )
+        return False
+
+    out = res.stdout.upper()
+    # Check for success marker
+    if "SUCCESSFULLY PROCESSED 1 FILES" not in out:
+        return False
+
+    # Check that broad public groups are NOT granted access
+    insecure_principals = (
+        "\\EVERYONE",
+        "BUILTIN\\USERS",
+        "NT AUTHORITY\\AUTHENTICATED USERS",
+    )
+    for principal in insecure_principals:
+        if principal in out:
+            logger.warning(f"Insecure principal '{principal}' found in file ACL for '{resolved}'.")
+            return False
+
+    return True
 
 
 def _atomic_write_key_file(target_file: Path, key_bytes: bytes) -> None:
@@ -72,9 +127,11 @@ def _atomic_write_key_file(target_file: Path, key_bytes: bytes) -> None:
             f.write(key_bytes)
             f.flush()
             os.fsync(f.fileno())
-        _restrict_file_permissions(temp_file)
+        if not _restrict_file_permissions(temp_file):
+            raise PermissionError(f"Failed to secure temporary key file permissions on {temp_file}")
         os.replace(temp_file, target_file)
-        _restrict_file_permissions(target_file)
+        if not _restrict_file_permissions(target_file):
+            raise PermissionError(f"Failed to secure key file permissions on {target_file}")
     finally:
         if temp_file.exists():
             with contextlib.suppress(Exception):
@@ -145,6 +202,14 @@ def get_proposal_signing_key() -> bytes:
         # 3. Persistent key file inspection
         key_file_path = Path(os.environ.get("JARVIS_PROPOSAL_KEY_FILE", "data/.proposal_key"))
         if key_file_path.exists():
+            # Check existing key file ACL before acceptance (fails closed if insecure)
+            if not _verify_file_permissions(key_file_path) and not _restrict_file_permissions(
+                key_file_path
+            ):
+                raise PermissionError(
+                    f"Proposal signing key file '{key_file_path}' has insecure ACL permissions. "
+                    "Refusing to load key material."
+                )
             key_bytes = key_file_path.read_bytes()
             if len(key_bytes) > 32 and key_bytes.endswith((b"\r", b"\n")):
                 key_bytes = key_bytes.rstrip(b"\r\n")
@@ -272,7 +337,9 @@ class ToolProposal:
             return k_bytes
         return get_proposal_signing_key()
 
-    def compute_signature(self, key: bytes | str | None = None) -> str:
+    def compute_signature(
+        self, key: bytes | str | None = None, include_approval_metadata: bool = True
+    ) -> str:
         """Generate genuine HMAC-SHA256 signature binding complete execution payload."""
         signing_key = self._resolve_key(key)
         tgt = self.target_identity or (
@@ -286,6 +353,9 @@ class ToolProposal:
             if isinstance(self.arguments, dict)
             else ""
         )
+        exp_iso = (
+            self.expires_at.isoformat() if (include_approval_metadata and self.expires_at) else None
+        )
         payload = {
             "v": 1,
             "proposal_id": self.proposal_id,
@@ -297,7 +367,7 @@ class ToolProposal:
             "requires_approval": self.requires_approval,
             "target_identity": tgt,
             "created_at": self.created_at.isoformat(),
-            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "expires_at": exp_iso,
         }
         canonical_bytes = _canonical_json(payload).encode("utf-8")
         mac = hmac.new(signing_key, canonical_bytes, hashlib.sha256).hexdigest()
@@ -334,15 +404,26 @@ class ToolProposal:
 
             self.status = ProposalStatus.APPROVED
             self.approved_at = datetime.now(UTC)
-            if expires_in_seconds is not None and expires_in_seconds > 0:
-                self.expires_at = self.approved_at + timedelta(seconds=expires_in_seconds)
+            effective_ttl = (
+                expires_in_seconds
+                if expires_in_seconds is not None and expires_in_seconds > 0
+                else PROPOSAL_APPROVAL_TTL_SECONDS
+            )
+            self.expires_at = self.approved_at + timedelta(seconds=effective_ttl)
             self.approved_signature = self.compute_signature(key=key)
 
     def reject(self, reason: str = "User or policy rejected execution") -> None:
         """Deny authorization for the proposal."""
         with getattr(self, "_lock", threading.RLock()):
-            if self.status in (ProposalStatus.EXECUTED, ProposalStatus.FAILED):
+            if self.status in (
+                ProposalStatus.EXECUTED,
+                ProposalStatus.FAILED,
+                ProposalStatus.CANCELLED,
+                ProposalStatus.EXPIRED,
+            ):
                 raise ValueError(f"Cannot reject proposal in terminal status '{self.status.value}'")
+            if self.status == ProposalStatus.REJECTED:
+                return
             self.status = ProposalStatus.REJECTED
             self.error = reason
             self.approved_signature = None
@@ -350,8 +431,15 @@ class ToolProposal:
     def expire(self, reason: str = "Approval request timed out") -> None:
         """Mark proposal as expired due to timeout."""
         with getattr(self, "_lock", threading.RLock()):
-            if self.status in (ProposalStatus.EXECUTED, ProposalStatus.FAILED):
+            if self.status in (
+                ProposalStatus.EXECUTED,
+                ProposalStatus.FAILED,
+                ProposalStatus.CANCELLED,
+                ProposalStatus.REJECTED,
+            ):
                 raise ValueError(f"Cannot expire proposal in terminal status '{self.status.value}'")
+            if self.status == ProposalStatus.EXPIRED:
+                return
             self.status = ProposalStatus.EXPIRED
             self.error = reason
             self.approved_signature = None
@@ -359,8 +447,15 @@ class ToolProposal:
     def cancel(self, reason: str = "Execution cancelled") -> None:
         """Cancel the in-flight proposal."""
         with getattr(self, "_lock", threading.RLock()):
-            if self.status in (ProposalStatus.EXECUTED, ProposalStatus.FAILED):
+            if self.status in (
+                ProposalStatus.EXECUTED,
+                ProposalStatus.FAILED,
+                ProposalStatus.EXPIRED,
+                ProposalStatus.REJECTED,
+            ):
                 raise ValueError(f"Cannot cancel proposal in terminal status '{self.status.value}'")
+            if self.status == ProposalStatus.CANCELLED:
+                return
             self.status = ProposalStatus.CANCELLED
             self.error = reason
             self.approved_signature = None
@@ -387,10 +482,19 @@ class ToolProposal:
                     if app.tzinfo is None:
                         app = app.replace(tzinfo=UTC)
                     now_utc = datetime.now(UTC)
+                    # Future timestamp beyond acceptable clock skew (60s) fails closed
                     if app > now_utc + timedelta(seconds=60):
                         return False
-                    if now_utc - app > timedelta(hours=24):
+                    # Past timestamp: approval cannot be older than PROPOSAL_APPROVAL_TTL_SECONDS
+                    if (now_utc - app) > timedelta(seconds=PROPOSAL_APPROVAL_TTL_SECONDS + 5):
                         return False
+                    # Relationship check: if expires_at is set, it cannot be farther than PROPOSAL_APPROVAL_TTL_SECONDS from approved_at
+                    if self.expires_at is not None:
+                        exp = self.expires_at
+                        if exp.tzinfo is None:
+                            exp = exp.replace(tzinfo=UTC)
+                        if (exp - app) > timedelta(seconds=PROPOSAL_APPROVAL_TTL_SECONDS + 5):
+                            return False
                 except Exception:
                     return False
             try:
@@ -434,6 +538,16 @@ class ToolProposal:
         with getattr(self, "_lock", threading.RLock()):
             if self.status == ProposalStatus.EXECUTED:
                 raise ValueError("Cannot mark an already executed proposal as failed")
+            if self.status == ProposalStatus.FAILED:
+                return
+            if self.status in (
+                ProposalStatus.CANCELLED,
+                ProposalStatus.REJECTED,
+                ProposalStatus.EXPIRED,
+            ):
+                raise ValueError(
+                    f"Cannot mark proposal as failed from terminal status '{self.status.value}'"
+                )
             self.status = ProposalStatus.FAILED
             self.error = error
             self.executed_at = datetime.now(UTC)

@@ -736,13 +736,39 @@ class AgentPlanner:
         parsed_steps: list[PlanStep] = []
         step_id_map: dict[Any, str] = {}
 
+        # 1. First pass: establish step identity and index mapping, and detect duplicate IDs
+        seen_step_identifiers: set[Any] = set()
+        raw_step_entries: list[dict[str, Any]] = []
+
         for idx, s_data in enumerate(reasoning_steps):
-            step_idx = s_data.get("step", idx + 1)
+            raw_id = s_data.get("step_id") or s_data.get("id") or s_data.get("step") or (idx + 1)
+            if raw_id in seen_step_identifiers:
+                raise PlanValidationError(
+                    f"Duplicate step identifier '{raw_id}' detected in reasoning plan."
+                )
+            seen_step_identifiers.add(raw_id)
+            new_uuid = str(uuid.uuid4())
+            step_id_map[raw_id] = new_uuid
+            step_id_map[str(raw_id)] = new_uuid
+            step_id_map[f"step_{idx + 1}"] = new_uuid
+            step_id_map[f"step_{raw_id}"] = new_uuid
+            raw_step_entries.append(
+                {
+                    "raw_id": raw_id,
+                    "uuid": new_uuid,
+                    "data": s_data,
+                    "idx": idx,
+                }
+            )
+
+        # 2. Second pass: build PlanStep instances with precise prerequisite resolution
+        for item in raw_step_entries:
+            s_data = item["data"]
+            new_id = item["uuid"]
+            idx = item["idx"]
+            step_idx = item["raw_id"]
             desc = s_data.get("description", f"Execute reasoning step {step_idx}")
             tool_hint = s_data.get("tool_hint")
-            new_id = str(uuid.uuid4())
-            step_id_map[step_idx] = new_id
-            step_id_map[idx] = new_id
 
             target_tool = None
             if tool_hint:
@@ -793,13 +819,74 @@ class AgentPlanner:
             stype = StepType.TOOL_CALL if target_tool else StepType.THOUGHT
             params = dict(s_data.get("parameters") or {})
 
-            # Prerequisite mapping to dependencies
+            # Real prerequisite resolution: support ID references, multiple prereqs, and non-sequential dependencies
             deps: list[str] = []
             prereqs = s_data.get("prerequisites", [])
-            if prereqs and idx > 0 and parsed_steps:
-                prev_id = parsed_steps[idx - 1].step_id
-                if prev_id:
-                    deps.append(prev_id)
+            if isinstance(prereqs, (str, int)):
+                prereqs = [prereqs]
+
+            for req in prereqs:
+                if not req:
+                    continue
+                # 1. Direct match in step_id_map (integer, string, step_X)
+                resolved_dep = None
+                if req in step_id_map:
+                    resolved_dep = step_id_map[req]
+                elif str(req) in step_id_map:
+                    resolved_dep = step_id_map[str(req)]
+                elif str(req).lower().replace(" ", "_") in step_id_map:
+                    resolved_dep = step_id_map[str(req).lower().replace(" ", "_")]
+                elif isinstance(req, int):
+                    # Explicit integer step reference not found in step_id_map
+                    raise PlanValidationError(
+                        f"Unknown prerequisite reference '{req}' in step '{step_idx}'."
+                    )
+                else:
+                    # Check if req mentions a step number (e.g. "step 1", "step_1", "#1")
+                    match = re.search(r"\b(?:step|#)\s*(\d+)\b", str(req), re.IGNORECASE)
+                    if match:
+                        n = int(match.group(1))
+                        if n in step_id_map:
+                            resolved_dep = step_id_map[n]
+                        elif str(n) in step_id_map:
+                            resolved_dep = step_id_map[str(n)]
+                        else:
+                            raise PlanValidationError(
+                                f"Unknown prerequisite reference '{req}' in step '{step_idx}'."
+                            )
+
+                if resolved_dep:
+                    if resolved_dep == new_id:
+                        raise PlanValidationError(
+                            f"Step '{step_idx}' cannot declare itself as a prerequisite (self-dependency)."
+                        )
+                    if resolved_dep not in deps:
+                        deps.append(resolved_dep)
+                else:
+                    # If prerequisite is a natural language condition (not referring to a specific step ID),
+                    # check if it matches an earlier step's action or description, or fall back safely to preceding step
+                    matched_earlier = False
+                    req_str = str(req).lower()
+                    for earlier in raw_step_entries[:idx]:
+                        e_desc = str(earlier["data"].get("description", "")).lower()
+                        e_action = str(earlier["data"].get("action", "")).lower()
+                        if req_str in e_desc or req_str in e_action or e_action in req_str:
+                            e_uuid = earlier["uuid"]
+                            if e_uuid not in deps:
+                                deps.append(e_uuid)
+                            matched_earlier = True
+                            break
+
+                    if not matched_earlier:
+                        if isinstance(req, int) or (isinstance(req, str) and req.isdigit()):
+                            raise PlanValidationError(
+                                f"Unknown prerequisite reference '{req}' in step '{step_idx}'."
+                            )
+                        # Natural language prerequisite: bind to immediately preceding step if available
+                        if idx > 0 and parsed_steps:
+                            prev_id = parsed_steps[idx - 1].step_id
+                            if prev_id not in deps:
+                                deps.append(prev_id)
 
             step = PlanStep(
                 step_id=new_id,
